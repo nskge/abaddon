@@ -7,6 +7,7 @@ import logging
 from .http_client import HTTPClient
 from .modules.base import Finding
 from .modules.cmdi import CommandInjectionScanner
+from .modules.headers import HeaderScanner
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
 from .modules.sqli import SQLiScanner
@@ -37,6 +38,7 @@ _MODULE_MAP = {
     "lfi": LFIScanner,
     "redirect": OpenRedirectScanner,
     "cmdi": CommandInjectionScanner,
+    "headers": HeaderScanner,
 }
 
 

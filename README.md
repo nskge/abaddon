@@ -23,6 +23,7 @@
 | **LFI** | Path traversal, absolute paths, null byte, URL-encoding bypass, PHP filter wrappers (base64-decode validation) |
 | **CMDi** | Output-based (echo token + /etc/passwd), Time-based (sleep/ping/timeout), Unix + Windows payloads |
 | **Open Redirect** | Location header analysis, meta-refresh, JavaScript redirect detection, URL scheme bypass variants |
+| **Headers** | Missing security headers (CSP/HSTS/X-Frame-Options/etc.), server version disclosure, CORS misconfiguration |
 
 **Additional capabilities**
 
@@ -32,7 +33,7 @@
 - GET and POST request support with append-mode injection (critical for numeric params)
 - Custom payload files per module
 - JSON and TXT report export
-- 56 unit tests covering all 5 modules
+- 69 unit tests covering all 6 modules
 
 ---
 
@@ -66,6 +67,9 @@ python main.py -u "http://target.local/search.php" -m POST -d "q=test" --scan-ty
 # Command injection
 python main.py -u "http://target.local/ping?host=127.0.0.1" --scan-type cmdi
 
+# Security headers analysis
+python main.py -u "http://target.local/page" --scan-type headers
+
 # Open redirect
 python main.py -u "http://target.local/login?redirect=/dashboard" --scan-type redirect
 
@@ -87,7 +91,7 @@ python main.py -u "http://target.local/?id=1" -o report.json --format json
 
 ```
 usage: okrscann [-h] -u URL [-m {GET,POST}] [-d POST_DATA] [-p PARAM]
-                [--scan-type {sqli,xss,lfi,redirect,cmdi,all}] [--crawl]
+                [--scan-type {sqli,xss,lfi,redirect,cmdi,headers,all}] [--crawl]
                 [--payloads FILE] [--delay DELAY] [--headers HEADER ...]
                 [--cookies COOKIES] [--proxy URL] [--timeout N]
                 [--user-agent UA] [--follow-redirects]
@@ -100,7 +104,7 @@ Target:
   -p, --param         Test only this parameter
 
 Scan options:
-  --scan-type         sqli | xss | lfi | redirect | cmdi | all  (default: all)
+  --scan-type         sqli | xss | lfi | redirect | cmdi | headers | all  (default: all)
   --crawl             Auto-detect HTML forms on the page
   --payloads FILE     Custom payload file (one per line, # = comment)
   --delay FLOAT       Time-based threshold in seconds  (default: 5.0)
@@ -175,6 +179,13 @@ Output:
 | Protocol-relative | `//evil.com` |
 | At-sign bypass | `https://legitimate.com@evil.com` |
 
+### Security Headers
+| Check | What it detects |
+|-------|-----------------|
+| Missing headers | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
+| Info disclosure | Server/X-Powered-By version strings (Apache, Nginx, IIS, PHP, etc.) |
+| CORS misconfig | Wildcard origin, credentials=true escalation |
+
 ---
 
 ## Running Tests
@@ -184,7 +195,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Expected: **56 passed**
+Expected: **69 passed**
 
 ---
 
@@ -209,6 +220,7 @@ vuln_scanner/
       lfi.py                    LFI (traversal + PHP wrappers)
       cmdi.py                   OS Command Injection
       open_redirect.py          Open Redirect
+      headers.py                Security Headers / Info Disclosure / CORS
   payloads/
     sqli.txt                    Reference SQLi payloads
     xss.txt                     Reference XSS payloads
@@ -221,6 +233,7 @@ vuln_scanner/
     test_lfi.py                 LFI tests (11)
     test_cmdi.py                CMDi tests (7)
     test_redirect.py            Open Redirect tests (7)
+    test_headers.py             Security Headers tests (13)
 ```
 
 ---
