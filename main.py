@@ -13,6 +13,7 @@ written permission to test. Unauthorized use may violate applicable laws.
 
 import argparse
 import sys
+import time
 
 from scanner.banner import print_banner
 from scanner.core import Scanner
@@ -164,10 +165,12 @@ def main() -> int:
     }
 
     scanner = Scanner(config, logger)
+    t0 = time.monotonic()
     findings = scanner.run()
+    elapsed = time.monotonic() - t0
 
     reporter = Reporter(no_color=args.no_color)
-    reporter.print_summary(findings)
+    reporter.print_summary(findings, elapsed=elapsed)
 
     if args.output:
         reporter.save_report(findings, args.output, args.format)

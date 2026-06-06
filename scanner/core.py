@@ -1,6 +1,7 @@
 """Core scanner orchestration -- coordinates modules and manages the scan flow."""
 
 import re
+import time
 from typing import Dict, List, Optional
 import logging
 
@@ -77,6 +78,7 @@ class Scanner:
 
     def run(self) -> List[Finding]:
         """Execute the scan and return all findings."""
+        t0 = time.monotonic()
         url = self.config["url"]
         method = self.config.get("method", "GET").upper()
         data_string = self.config.get("data") or ""
@@ -114,8 +116,12 @@ class Scanner:
         for target in targets:
             self._scan_target(target)
 
+        elapsed = time.monotonic() - t0
         n = len(self.findings)
-        logger.info("Scan complete -- %d finding%s.", n, "" if n == 1 else "s")
+        logger.info(
+            "Scan complete -- %d finding%s in %.1fs.",
+            n, "" if n == 1 else "s", elapsed,
+        )
         return self.findings
 
     # ------------------------------------------------------------------

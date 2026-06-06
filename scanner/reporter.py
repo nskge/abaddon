@@ -50,6 +50,14 @@ _TYPE_COLOR = {
     "Open Redirect":       BLUE,
     "Command Injection":   RED,
     "CMDi":                RED,
+    "SSTI":                RED,
+    "Template Injection":  RED,
+    "CRLF":                YELLOW,
+    "Response Splitting":  YELLOW,
+    "Missing Security":    CYAN,
+    "Information Disclosure": CYAN,
+    "CORS":                YELLOW,
+    "Header":              CYAN,
 }
 
 
@@ -75,7 +83,7 @@ class Reporter:
     # Console output
     # ------------------------------------------------------------------
 
-    def print_summary(self, findings: List[Finding]) -> None:
+    def print_summary(self, findings: List[Finding], elapsed: float = 0.0) -> None:
         """Print a structured, human-readable summary to stdout."""
         header_line = "  SCAN RESULTS"
         sep = self._c("  " + "=" * 52, BOLD)
@@ -140,6 +148,8 @@ class Reporter:
         print(sep)
         summary_text = f"  {len(findings)} finding(s) -- review and validate before reporting."
         print(self._c(summary_text, BOLD))
+        if elapsed > 0:
+            print(self._c(f"  Scan completed in {elapsed:.1f}s", DIM))
         print()
 
     def _field(self, label: str, value: str, color: str = "") -> None:
