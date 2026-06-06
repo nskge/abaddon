@@ -17,7 +17,7 @@ INFO_LINE = "  [ SQLi | XSS | LFI | CMDi | SSTI | CRLF | Redirect | Headers ]"
 
 SEPARATOR = "  " + "=" * 52
 
-WARN_LINE = "  [ Use only on targets you have permission to test ]"
+WARN_LINE = "  [ Authorized targets ONLY -- author assumes NO liability ]"
 
 
 def print_banner(color: bool = True) -> None:

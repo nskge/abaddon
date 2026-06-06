@@ -10,7 +10,9 @@
 
 **Modular web vulnerability scanner** for penetration testing and security assessments.
 
-> **Legal:** Only run against systems you own or have **explicit written permission** to test.
+> **This tool is provided strictly for educational purposes and authorized security testing.**
+> The author assumes **no liability** for any misuse or damage caused by this software.
+> See the full [Disclaimer](#disclaimer) below.
 
 ---
 
@@ -278,3 +280,29 @@ To add a new module:
 2. Implement `scan_parameter(url, method, params, param_name) -> List[Finding]`
 3. Register in `scanner/core.py` `_MODULE_MAP`
 4. Add `--scan-type mymodule` to argparse choices in `main.py`
+
+---
+
+## Disclaimer
+
+**OkrScann is designed exclusively for legal and authorized security testing.**
+
+By downloading, installing, or using this software you agree to the following terms:
+
+1. **Authorized use only.** You may only use OkrScann against systems that you own or that you have **explicit, written authorization** to test. Unauthorized access to computer systems is a crime in virtually every jurisdiction (e.g. CFAA in the US, Computer Misuse Act in the UK, Art. 154-A of the Brazilian Penal Code).
+
+2. **No liability.** The author(s) of OkrScann provide this software **"as is"**, without warranty of any kind. The author(s) accept **no responsibility or liability** for any damage, data loss, legal consequences, or other harm that may result from the use or misuse of this tool — whether direct, indirect, incidental, or consequential.
+
+3. **Your responsibility.** You are solely responsible for ensuring that your use of OkrScann complies with all applicable local, state, national, and international laws and regulations. If you are unsure whether you are authorized to test a given target, **do not test it**.
+
+4. **Educational purpose.** This project was created as a learning exercise and portfolio piece to demonstrate offensive-security concepts. It is not intended to facilitate, encourage, or enable any illegal activity.
+
+5. **No guarantee of accuracy.** Scan results may contain false positives or false negatives. Always validate findings manually before including them in a professional report.
+
+**If you use this tool against systems without authorization, you do so at your own risk and the author bears zero responsibility for your actions.**
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

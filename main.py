@@ -2,10 +2,13 @@
 """
 OkrScann -- Web Vulnerability Scanner
 ======================================
-Detects SQLi, XSS, LFI, OS Command Injection, and Open Redirects
-against authorised targets.
+Modular scanner for SQLi, XSS, LFI, CMDi, SSTI, CRLF, Open Redirects,
+and Security Header analysis.
 
-Only run against systems you own or have explicit written permission to test.
+DISCLAIMER: This tool is provided for authorized security testing and
+educational purposes ONLY. The author assumes NO responsibility or liability
+for any misuse or damage. Only run against systems you own or have explicit
+written permission to test. Unauthorized use may violate applicable laws.
 """
 
 import argparse
