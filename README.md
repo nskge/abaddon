@@ -39,7 +39,7 @@
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USER/OkrScann.git
+git clone https://github.com/nskge/OkrScann.git
 cd OkrScann/vuln_scanner
 pip install -r requirements.txt
 ```
