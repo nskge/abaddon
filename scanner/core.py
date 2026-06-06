@@ -11,6 +11,7 @@ from .modules.headers import HeaderScanner
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
 from .modules.sqli import SQLiScanner
+from .modules.ssti import SSTIScanner
 from .modules.xss import XSSScanner
 from .parser import (
     extract_forms,
@@ -38,6 +39,7 @@ _MODULE_MAP = {
     "lfi": LFIScanner,
     "redirect": OpenRedirectScanner,
     "cmdi": CommandInjectionScanner,
+    "ssti": SSTIScanner,
     "headers": HeaderScanner,
 }
 

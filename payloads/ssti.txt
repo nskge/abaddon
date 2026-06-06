@@ -1,0 +1,26 @@
+# SSTI (Server-Side Template Injection) payloads
+# Math evaluation probes -- safe, no side effects
+
+# Jinja2 / Twig
+{{7*7}}
+{{7*'7'}}
+{{43*47}}
+{{17*19}}
+{{'okr'+'scn'}}
+
+# Freemarker / Mako
+${7*7}
+${43*47}
+${17*19}
+${'okr'+'scn'}
+
+# ERB (Ruby)
+<%= 7*7 %>
+<%= 43*47 %>
+<%= 'okr'+'scn' %>
+
+# Smarty (PHP)
+{7*7}
+
+# Velocity (Java)
+#set($x=7*7)${x}

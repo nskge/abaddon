@@ -13,7 +13,7 @@ BANNER = r"""
 
 TAGLINE = f"  [ OkrScann v{__version__} -- Web Vulnerability Scanner ]"
 
-INFO_LINE = "  [ SQLi | XSS | LFI | CMDi | Redirect | Headers ]"
+INFO_LINE = "  [ SQLi | XSS | LFI | CMDi | SSTI | Redirect | Headers ]"
 
 SEPARATOR = "  " + "=" * 52
 
