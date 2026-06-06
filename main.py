@@ -71,7 +71,7 @@ Examples
     scan = parser.add_argument_group("Scan options")
     scan.add_argument(
         "--scan-type",
-        choices=["sqli", "xss", "lfi", "redirect", "cmdi", "ssti", "headers", "all"],
+        choices=["sqli", "xss", "lfi", "redirect", "cmdi", "crlf", "ssti", "headers", "all"],
         default="all",
         help="Vulnerability type to scan for  (default: all)",
     )

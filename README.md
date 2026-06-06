@@ -23,6 +23,7 @@
 | **LFI** | Path traversal, absolute paths, null byte, URL-encoding bypass, PHP filter wrappers (base64-decode validation) |
 | **CMDi** | Output-based (echo token + /etc/passwd), Time-based (sleep/ping/timeout), Unix + Windows payloads |
 | **SSTI** | Server-Side Template Injection -- math evaluation probes for Jinja2, Twig, Freemarker, Mako, ERB, Smarty, Velocity |
+| **CRLF** | CRLF injection / HTTP response splitting -- header injection, Set-Cookie injection, body injection |
 | **Open Redirect** | Location header analysis, meta-refresh, JavaScript redirect detection, URL scheme bypass variants |
 | **Headers** | Missing security headers (CSP/HSTS/X-Frame-Options/etc.), server version disclosure, CORS misconfiguration |
 
@@ -34,7 +35,7 @@
 - GET and POST request support with append-mode injection (critical for numeric params)
 - Custom payload files per module
 - JSON and TXT report export
-- 82 unit tests covering all 7 modules
+- 92 unit tests covering all 8 modules
 
 ---
 
@@ -71,6 +72,9 @@ python main.py -u "http://target.local/ping?host=127.0.0.1" --scan-type cmdi
 # Template injection (SSTI)
 python main.py -u "http://target.local/render?name=test" --scan-type ssti
 
+# CRLF injection / response splitting
+python main.py -u "http://target.local/redirect?url=/" --scan-type crlf
+
 # Security headers analysis
 python main.py -u "http://target.local/page" --scan-type headers
 
@@ -95,7 +99,7 @@ python main.py -u "http://target.local/?id=1" -o report.json --format json
 
 ```
 usage: okrscann [-h] -u URL [-m {GET,POST}] [-d POST_DATA] [-p PARAM]
-                [--scan-type {sqli,xss,lfi,redirect,cmdi,ssti,headers,all}] [--crawl]
+                [--scan-type {sqli,xss,lfi,redirect,cmdi,crlf,ssti,headers,all}] [--crawl]
                 [--payloads FILE] [--delay DELAY] [--headers HEADER ...]
                 [--cookies COOKIES] [--proxy URL] [--timeout N]
                 [--user-agent UA] [--follow-redirects]
@@ -108,7 +112,7 @@ Target:
   -p, --param         Test only this parameter
 
 Scan options:
-  --scan-type         sqli | xss | lfi | redirect | cmdi | ssti | headers | all  (default: all)
+  --scan-type         sqli | xss | lfi | redirect | cmdi | crlf | ssti | headers | all  (default: all)
   --crawl             Auto-detect HTML forms on the page
   --payloads FILE     Custom payload file (one per line, # = comment)
   --delay FLOAT       Time-based threshold in seconds  (default: 5.0)
@@ -185,6 +189,15 @@ Output:
 | Smarty (PHP) | `{7*7}` | `49` |
 | Jinja2 string | `{{'okr'+'scn'}}` | `okrscn` |
 
+### CRLF Injection
+| Technique | Payload |
+|-----------|---------|
+| URL-encoded CRLF | `%0d%0aInjected: true` |
+| Double-encoded | `%250d%250aInjected: true` |
+| LF only | `%0aInjected: true` |
+| Set-Cookie injection | `%0d%0aSet-Cookie: test=injected` |
+| Body injection | `%0d%0a%0d%0a<tag>injected</tag>` |
+
 ### Open Redirect
 | Technique | Payload |
 |-----------|---------|
@@ -208,7 +221,7 @@ pip install pytest
 python -m pytest tests/ -v
 ```
 
-Expected: **82 passed**
+Expected: **92 passed**
 
 ---
 
@@ -234,6 +247,7 @@ vuln_scanner/
       cmdi.py                   OS Command Injection
       open_redirect.py          Open Redirect
       ssti.py                   Server-Side Template Injection
+      crlf.py                   CRLF Injection / Response Splitting
       headers.py                Security Headers / Info Disclosure / CORS
   payloads/
     sqli.txt                    Reference SQLi payloads
@@ -241,6 +255,7 @@ vuln_scanner/
     lfi.txt                     Reference LFI payloads
     cmdi.txt                    Reference CMDi payloads
     ssti.txt                    Reference SSTI payloads
+    crlf.txt                    Reference CRLF payloads
     redirect.txt                Reference redirect payloads
   tests/
     test_sqli.py                SQLi tests (17)
@@ -249,6 +264,7 @@ vuln_scanner/
     test_cmdi.py                CMDi tests (7)
     test_redirect.py            Open Redirect tests (7)
     test_ssti.py                SSTI tests (13)
+    test_crlf.py                CRLF Injection tests (10)
     test_headers.py             Security Headers tests (13)
 ```
 

