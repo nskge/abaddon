@@ -1,0 +1,20 @@
+# Open Redirect Payloads -- OkrScann reference list
+# Usage: python main.py -u "..." --scan-type redirect --payloads payloads/redirect.txt
+#
+# Format: one payload per line.  Lines starting with # are ignored.
+# -----------------------------------------------------------------------
+
+https://evil.com
+http://evil.com
+//evil.com
+https://evil.com/%2f..
+/////evil.com
+https://evil.com@legitimate.com
+https://legitimate.com@evil.com
+/evil.com
+https:evil.com
+/\/evil.com
+htTps://evil.com
+https://evil.com#
+https://evil.com?
+https://evil.com\
