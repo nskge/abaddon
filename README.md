@@ -28,8 +28,9 @@ Built for speed, accuracy, and real-world pentest reports.
 | **CRLF** | Header injection, Set-Cookie injection, response splitting |
 | **Redirect** | Open redirect via Location header, meta-refresh, JavaScript |
 | **Headers** | Missing security headers, server version disclosure, CORS misconfig |
+| **CVE Detection** | Outdated service version matching against 18 known CVEs (Apache, Nginx, PHP, IIS, Tomcat, OpenSSL, jQuery, WordPress) with CVSS scores and Metasploit module references |
 
-**Key features:** target recon (IP/server/tech fingerprinting), auto-crawl forms, WAF detection, concurrent scanning (configurable threads), finding deduplication, reproduction steps with curl commands, JSON/TXT export, 92 unit tests.
+**Key features:** target recon (IP/server/tech fingerprinting), CVE detection with Metasploit integration, auto-crawl forms, WAF detection, concurrent scanning (configurable threads), finding deduplication, reproduction steps (curl + msfconsole commands), JSON/TXT export, 125 unit tests.
 
 ---
 
@@ -92,7 +93,7 @@ python main.py -u "http://target/?id=1" -o report.json --format json
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 92 tests
+python -m pytest tests/ -v     # 125 tests
 ```
 
 ---

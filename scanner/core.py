@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from urllib.parse import urlparse
 import logging
 
+from .cve_db import extract_versions, match_cves
 from .http_client import HTTPClient
 from .modules.base import Finding
 from .modules.cmdi import CommandInjectionScanner
@@ -279,6 +280,122 @@ class Scanner:
         print(self._c("   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
         print(self._c("   +----------------------", _DIM))
         print()
+
+        # -- CVE detection from service versions --
+        if resp is not None:
+            versions = extract_versions(resp)
+            cve_matches = match_cves(versions)
+            if cve_matches:
+                self._print_cve_box(cve_matches)
+                self._create_cve_findings(cve_matches, url, parsed)
+
+    def _print_cve_box(self, matches: List[dict]) -> None:
+        """Display matched CVEs in a styled box below recon."""
+        n = len(matches)
+        print(self._c(
+            f"   +--- Outdated Services ({n} CVE{'s' if n != 1 else ''}) ---",
+            _RED + "\033[1m",
+        ))
+
+        for m in matches:
+            sev = m["severity"]
+            if sev == "CRITICAL":
+                sev_c = _RED + "\033[1m"
+            elif sev == "HIGH":
+                sev_c = _RED
+            elif sev == "MEDIUM":
+                sev_c = _YELLOW
+            else:
+                sev_c = _CYAN
+
+            # First sentence of impact for the summary line
+            short = m["impact"].split(". ")[0]
+
+            print(self._c("   |", _DIM))
+            print(
+                self._c("   | ", _DIM)
+                + self._c(f"[{sev}] ", sev_c)
+                + self._c(f"{m['cve']} ", "\033[1m")
+                + self._c(f"(CVSS {m['cvss']})", _DIM)
+            )
+            print(
+                self._c("   |   ", _DIM)
+                + self._c(f"{m['service'].title()} {m['version']}", _YELLOW)
+                + self._c(f" -- {short}", _DIM)
+            )
+            if m["msf"]:
+                print(
+                    self._c("   |   MSF: ", _DIM)
+                    + self._c(m["msf"], "\033[92m")
+                )
+
+        print(self._c("   |", _DIM))
+        print(self._c("   +----------------------------------", _DIM))
+        print()
+
+    def _create_cve_findings(
+        self, matches: List[dict], url: str, parsed,
+    ) -> None:
+        """Generate Finding objects for each CVE match."""
+        host = parsed.hostname or "target"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        ssl_flag = "set SSL true; " if parsed.scheme == "https" else ""
+
+        for m in matches:
+            sev = m["severity"]
+            if sev in ("CRITICAL", "HIGH"):
+                conf = "high"
+            elif sev == "MEDIUM":
+                conf = "medium"
+            else:
+                conf = "low"
+
+            # Build reproduction steps
+            repro_lines = [
+                "# 1. Confirm the service version:",
+                f'$ curl -s -k -I "{url}" | grep -i "Server\\|X-Powered-By"',
+                f"# Expected: {m['service'].title()}/{m['version']}",
+                "",
+                f"# 2. {m['cve']} (CVSS {m['cvss']}, {sev})",
+                f"# {m['impact'].split('. ')[0]}",
+            ]
+            if m["msf"]:
+                repro_lines += [
+                    "",
+                    "# 3. Verify with Metasploit:",
+                    f'$ msfconsole -q -x "use {m["msf"]}; '
+                    f'set RHOSTS {host}; set RPORT {port}; '
+                    f'{ssl_flag}check"',
+                    "",
+                    "# 4. Exploit (if confirmed vulnerable):",
+                    f'$ msfconsole -q -x "use {m["msf"]}; '
+                    f'set RHOSTS {host}; set RPORT {port}; '
+                    f'{ssl_flag}run"',
+                ]
+            else:
+                repro_lines += [
+                    "",
+                    "# 3. Search for public exploits:",
+                    f'$ searchsploit "{m["service"]}" "{m["version"]}"',
+                    "",
+                    f"# 4. Reference: https://nvd.nist.gov/vuln/detail/{m['cve']}",
+                ]
+
+            finding = Finding(
+                vuln_type=f"Known CVE: {m['cve']}",
+                url=url,
+                method="GET",
+                parameter="(version disclosure)",
+                payload="N/A",
+                evidence=f"{m['service'].title()}/{m['version']}",
+                confidence=conf,
+                details=m["impact"],
+                reproduction="\n".join(repro_lines),
+            )
+            key = (finding.vuln_type, finding.url, finding.parameter, finding.payload)
+            if key not in self._seen_keys:
+                self._seen_keys.add(key)
+                self.findings.append(finding)
 
     @staticmethod
     def _fingerprint(resp) -> List[str]:

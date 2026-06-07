@@ -58,6 +58,8 @@ _TYPE_COLOR = {
     "Information Disclosure": CYAN,
     "CORS":                YELLOW,
     "Header":              CYAN,
+    "CVE":                 RED,
+    "Known CVE":           RED,
 }
 
 
