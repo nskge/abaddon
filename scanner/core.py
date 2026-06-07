@@ -1,8 +1,11 @@
 """Core scanner orchestration -- coordinates modules and manages the scan flow."""
 
 import re
+import socket
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 import logging
 
 from .http_client import HTTPClient
@@ -46,6 +49,18 @@ _MODULE_MAP = {
     "headers": HeaderScanner,
 }
 
+# ANSI helpers for recon display
+_CYAN = "\033[96m"
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+_GREEN = "\033[92m"
+_YELLOW = "\033[93m"
+_RED = "\033[91m"
+_RESET = "\033[0m"
+
+# Max parallel module threads per parameter
+_MAX_WORKERS = 4
+
 
 class Scanner:
     """Orchestrates vulnerability scanning across one or more modules.
@@ -59,6 +74,7 @@ class Scanner:
     def __init__(self, config: Dict, app_logger=None) -> None:
         self.config = config
         self.findings: List[Finding] = []
+        self._no_color = config.get("no_color", False)
 
         self.http = HTTPClient(
             headers=config.get("headers", {}),
@@ -70,9 +86,9 @@ class Scanner:
 
         scan_type = config.get("scan_type", "all")
         if scan_type == "all":
-            self.modules = [cls(self.http, config) for cls in _MODULE_MAP.values()]
+            self.module_classes = list(_MODULE_MAP.values())
         elif scan_type in _MODULE_MAP:
-            self.modules = [_MODULE_MAP[scan_type](self.http, config)]
+            self.module_classes = [_MODULE_MAP[scan_type]]
         else:
             raise ValueError(f"Unknown scan type: {scan_type!r}")
 
@@ -85,8 +101,11 @@ class Scanner:
         target_param = self.config.get("param")
         crawl = self.config.get("crawl", False)
 
+        # -- Recon phase --
+        self._print_recon(url)
+
         logger.info("Target  : %s [%s]", url, method)
-        logger.info("Modules : %s", [m.NAME for m in self.modules])
+        logger.info("Modules : %s", [cls.NAME for cls in self.module_classes])
 
         baseline_resp = self._preflight_check(url, method, data_string)
 
@@ -123,6 +142,54 @@ class Scanner:
             n, "" if n == 1 else "s", elapsed,
         )
         return self.findings
+
+    # ------------------------------------------------------------------
+    # Recon display
+    # ------------------------------------------------------------------
+
+    def _c(self, text: str, code: str) -> str:
+        return f"{code}{text}{_RESET}" if not self._no_color else text
+
+    def _print_recon(self, url: str) -> None:
+        """Resolve and display target information before scanning."""
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+
+        # DNS resolution
+        ip = "N/A"
+        try:
+            ip = socket.gethostbyname(hostname)
+        except (socket.gaierror, OSError):
+            pass
+
+        # Quick HEAD request for server info
+        server = ""
+        tech = ""
+        status = ""
+        try:
+            resp = self.http.get(url)
+            if resp is not None:
+                status = str(resp.status_code)
+                server = resp.headers.get("Server", "")
+                xpow = resp.headers.get("X-Powered-By", "")
+                if xpow:
+                    tech = xpow
+        except Exception:
+            pass
+
+        print(self._c("   +--- Target Recon ---", _DIM))
+        print(self._c(f"   | Host     : ", _DIM) + self._c(hostname, _CYAN + _BOLD))
+        print(self._c(f"   | IP       : ", _DIM) + self._c(ip, _CYAN))
+        if status:
+            sc = _GREEN if status.startswith("2") else (_YELLOW if status.startswith("3") else _RED)
+            print(self._c(f"   | Status   : ", _DIM) + self._c(f"HTTP {status}", sc))
+        if server:
+            print(self._c(f"   | Server   : ", _DIM) + self._c(server, _YELLOW))
+        if tech:
+            print(self._c(f"   | Tech     : ", _DIM) + self._c(tech, _YELLOW))
+        print(self._c(f"   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
+        print(self._c("   +----------------------", _DIM))
+        print()
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -246,12 +313,35 @@ class Scanner:
 
         logger.info("  Testing param=%r [%s]", param_name, method)
 
-        for module in self.modules:
-            logger.debug("    Module: %s", module.NAME)
-            new_findings = module.scan_parameter(url, method, params, param_name)
-            for f in new_findings:
-                logger.info(
-                    "    [VULN] %s  param=%r  confidence=%s",
-                    f.vuln_type, f.parameter, f.confidence,
-                )
-            self.findings.extend(new_findings)
+        # Each module gets its own HTTPClient so they can scan in parallel
+        # without sharing state (e.g. redirect following toggle)
+        def _run_module(module_cls):
+            http_copy = HTTPClient(
+                headers=self.config.get("headers", {}),
+                cookies=self.config.get("cookies", {}),
+                proxy=self.config.get("proxy"),
+                timeout=self.config.get("timeout", 10),
+                follow_redirects=self.config.get("follow_redirects", True),
+            )
+            module = module_cls(http_copy, self.config)
+            return module.scan_parameter(url, method, params, param_name)
+
+        # Run modules concurrently for speed
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+            futures = {
+                pool.submit(_run_module, cls): cls.NAME
+                for cls in self.module_classes
+            }
+            for future in as_completed(futures):
+                mod_name = futures[future]
+                try:
+                    new_findings = future.result()
+                except Exception as exc:
+                    logger.debug("Module %s error: %s", mod_name, exc)
+                    continue
+                for f in new_findings:
+                    logger.info(
+                        "    [VULN] %s  param=%r  confidence=%s",
+                        f.vuln_type, f.parameter, f.confidence,
+                    )
+                self.findings.extend(new_findings)

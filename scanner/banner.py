@@ -2,44 +2,62 @@
 
 from scanner import __version__
 
-# Safe ASCII-only art that works on every terminal encoding
+# Hand-crafted angular banner -- ASCII-safe for all terminal encodings
 BANNER = r"""
-   ___  _          ____
-  / _ \| | ___ __ / ___|  ___ __ _ _ __  _ __
- | | | | |/ / '__\___ \ / __/ _` | '_ \| '_ \
- | |_| |   <| |   ___) | (_| (_| | | | | | | |
-  \___/|_|\_\_|  |____/ \___\__,_|_| |_|_| |_|
+     ____  _        ____
+    / __ \| | _____/ ___|  ___ __ _ _ __  _ __
+   | |  | | |/ / __\___ \ / __/ _` | '_ \| '_ \
+   | |__| |   <| |  ___) | (_| (_| | | | | | | |
+    \____/|_|\_\_| |____/ \___\__,_|_| |_|_| |_|
 """
 
-TAGLINE = f"  [ OkrScann v{__version__} -- Web Vulnerability Scanner ]"
+INFO_BOX = f"""\
+   +---------------------------------------------------------+
+   |  OkrScann v{__version__:<8s} -- Web Vulnerability Scanner       |
+   |  Modules: SQLi XSS LFI CMDi SSTI CRLF Redirect Headers |
+   +---------------------------------------------------------+"""
 
-INFO_LINE = "  [ SQLi | XSS | LFI | CMDi | SSTI | CRLF | Redirect | Headers ]"
-
-SEPARATOR = "  " + "=" * 52
-
-WARN_LINE = "  [ Authorized targets ONLY -- author assumes NO liability ]"
+WARN_LINE = "   [!] Authorized targets ONLY -- author assumes NO liability"
 
 
 def print_banner(color: bool = True) -> None:
     """Print the full banner to stdout."""
-    if color:
-        RED = "\033[91m"
-        CYAN = "\033[96m"
-        YELLOW = "\033[93m"
-        DIM = "\033[2m"
-        BOLD = "\033[1m"
-        RESET = "\033[0m"
-
-        print(f"{RED}{BOLD}{BANNER}{RESET}")
-        print(f"{CYAN}{BOLD}{TAGLINE}{RESET}")
-        print(f"{CYAN}{INFO_LINE}{RESET}")
-        print(f"{DIM}{WARN_LINE}{RESET}")
-        print(f"{CYAN}{SEPARATOR}{RESET}")
-        print()
-    else:
+    if not color:
         print(BANNER)
-        print(TAGLINE)
-        print(INFO_LINE)
+        print(INFO_BOX)
         print(WARN_LINE)
-        print(SEPARATOR)
         print()
+        return
+
+    # Gradient: dark red -> bright red -> dark red (line by line)
+    DARK_RED = "\033[31m"
+    RED      = "\033[91m"
+    BOLD     = "\033[1m"
+    CYAN     = "\033[96m"
+    DIM      = "\033[2m"
+    YELLOW   = "\033[93m"
+    RESET    = "\033[0m"
+
+    banner_lines = BANNER.strip("\n").split("\n")
+    n = len(banner_lines)
+    for i, line in enumerate(banner_lines):
+        # Gradient: edges dark, center bright
+        dist = abs(i - n // 2)
+        if dist == 0:
+            c = RED + BOLD
+        elif dist <= 1:
+            c = RED
+        else:
+            c = DARK_RED + BOLD
+        print(f"{c}{line}{RESET}")
+
+    print()
+    # Info box in cyan
+    for line in INFO_BOX.split("\n"):
+        if line.strip().startswith("+"):
+            print(f"{DIM}{line}{RESET}")
+        else:
+            print(f"{CYAN}{line}{RESET}")
+
+    print(f"{YELLOW}{WARN_LINE}{RESET}")
+    print()

@@ -1,48 +1,39 @@
 # OkrScann
 
 ```
-   ___  _          ____
-  / _ \| | ___ __ / ___|  ___ __ _ _ __  _ __
- | | | | |/ / '__\___ \ / __/ _` | '_ \| '_ \
- | |_| |   <| |   ___) | (_| (_| | | | | | | |
-  \___/|_|\_\_|  |____/ \___\__,_|_| |_|_| |_|
+     ____  _        ____
+    / __ \| | _____/ ___|  ___ __ _ _ __  _ __
+   | |  | | |/ / __\___ \ / __/ _` | '_ \| '_ \
+   | |__| |   <| |  ___) | (_| (_| | | | | | | |
+    \____/|_|\_\_| |____/ \___\__,_|_| |_|_| |_|
 ```
 
 **Modular web vulnerability scanner** for penetration testing and security assessments.
+Built for speed, accuracy, and real-world pentest reports.
 
-> **This tool is provided strictly for educational purposes and authorized security testing.**
-> The author assumes **no liability** for any misuse or damage caused by this software.
-> See the full [Disclaimer](#disclaimer) below.
-
----
-
-## Features
-
-| Module | Techniques |
-|--------|------------|
-| **SQLi** | Error-based (MySQL/MSSQL/Oracle/PostgreSQL/SQLite), Boolean-based blind (AND + OR), Time-based blind (SLEEP/WAITFOR/pg_sleep) |
-| **XSS** | Reflected -- probe + context detection (HTML/attribute/script), context-aware payloads, unencoded-reflection validation |
-| **LFI** | Path traversal, absolute paths, null byte, URL-encoding bypass, PHP filter wrappers (base64-decode validation) |
-| **CMDi** | Output-based (echo token + /etc/passwd), Time-based (sleep/ping/timeout), Unix + Windows payloads |
-| **SSTI** | Server-Side Template Injection -- math evaluation probes for Jinja2, Twig, Freemarker, Mako, ERB, Smarty, Velocity |
-| **CRLF** | CRLF injection / HTTP response splitting -- header injection, Set-Cookie injection, body injection |
-| **Open Redirect** | Location header analysis, meta-refresh, JavaScript redirect detection, URL scheme bypass variants |
-| **Headers** | Missing security headers (CSP/HSTS/X-Frame-Options/etc.), server version disclosure, CORS misconfiguration |
-
-**Additional capabilities**
-
-- **Reproduction steps**: every finding includes manual verification instructions (curl commands, evidence grep patterns, escalation hints) -- a ready-made PoC for your pentest report
-- Auto-crawl: `--crawl` auto-detects HTML forms on the page (no need to know field names or method)
-- WAF detection: warns when Cloudflare/Incapsula/ModSecurity is blocking requests
-- Session-based HTTP client with custom headers, cookies, proxy support (Burp Suite)
-- GET and POST request support with append-mode injection (critical for numeric params)
-- Custom payload files per module
-- JSON and TXT report export
-- 92 unit tests covering all 8 modules
+> **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
+> See [Disclaimer](#disclaimer) below.
 
 ---
 
-## Installation
+## Modules
+
+| Module | What it detects |
+|--------|----------------|
+| **SQLi** | Error-based, Boolean-blind, Time-blind (MySQL, MSSQL, Oracle, PostgreSQL, SQLite) |
+| **XSS** | Reflected XSS with context detection (HTML / attribute / script) |
+| **LFI** | Path traversal, PHP filter wrappers, encoding bypass, null byte |
+| **CMDi** | OS command injection -- output-based + time-based (Unix & Windows) |
+| **SSTI** | Template injection (Jinja2, Twig, Freemarker, Mako, ERB, Smarty, Velocity) |
+| **CRLF** | Header injection, Set-Cookie injection, response splitting |
+| **Redirect** | Open redirect via Location header, meta-refresh, JavaScript |
+| **Headers** | Missing security headers, server version disclosure, CORS misconfig |
+
+**Key features:** target recon (IP/server/tech), auto-crawl forms, WAF detection, concurrent scanning, reproduction steps with curl commands, JSON/TXT export, 92 unit tests.
+
+---
+
+## Install
 
 ```bash
 git clone https://github.com/nskge/OkrScann.git
@@ -50,260 +41,81 @@ cd OkrScann/vuln_scanner
 pip install -r requirements.txt
 ```
 
-**Requirements:** Python 3.10+, `requests`, `colorama`
+**Requires:** Python 3.10+
 
 ---
 
-## Quick Start
+## Usage
 
 ```bash
-# Full scan on all GET parameters
-python main.py -u "http://target.local/page?id=1"
+# Full scan
+python main.py -u "http://target/page?id=1"
 
-# Auto-detect forms (discovers fields + method automatically)
-python main.py -u "http://target.local/search.php" --crawl
+# Auto-detect forms
+python main.py -u "http://target/search.php" --crawl
 
-# SQLi only on specific param
-python main.py -u "http://target.local/page?id=1&cat=2" --scan-type sqli -p id
+# Specific module
+python main.py -u "http://target/page?id=1" --scan-type sqli -p id
 
-# XSS on a POST form
-python main.py -u "http://target.local/search.php" -m POST -d "q=test" --scan-type xss
+# POST form
+python main.py -u "http://target/search" -m POST -d "q=test" --scan-type xss
 
-# Command injection
-python main.py -u "http://target.local/ping?host=127.0.0.1" --scan-type cmdi
+# With proxy (Burp Suite)
+python main.py -u "http://target/?q=test" --proxy http://127.0.0.1:8080
 
-# Template injection (SSTI)
-python main.py -u "http://target.local/render?name=test" --scan-type ssti
+# Export JSON report
+python main.py -u "http://target/?id=1" -o report.json --format json
+```
 
-# CRLF injection / response splitting
-python main.py -u "http://target.local/redirect?url=/" --scan-type crlf
+### Options
 
-# Security headers analysis
-python main.py -u "http://target.local/page" --scan-type headers
-
-# Open redirect
-python main.py -u "http://target.local/login?redirect=/dashboard" --scan-type redirect
-
-# Route through Burp Suite
-python main.py -u "http://target.local/?q=test" --proxy http://127.0.0.1:8080
-
-# Custom cookies + headers
-python main.py -u "http://target.local/page?id=1" \
-  --cookies "session=abc123; role=admin" \
-  --headers "X-Forwarded-For: 127.0.0.1"
-
-# Export to JSON
-python main.py -u "http://target.local/?id=1" -o report.json --format json
+```
+-u, --url           Target URL (required)
+-m, --method        GET or POST (default: GET)
+-d, --data          POST body
+-p, --param         Test only this parameter
+--scan-type         sqli|xss|lfi|cmdi|ssti|crlf|redirect|headers|all
+--crawl             Auto-detect HTML forms
+--payloads FILE     Custom payload file
+--cookies           Cookie string
+--proxy URL         HTTP proxy
+--timeout N         Request timeout (default: 10s)
+-o, --output FILE   Save report to file
+--format            txt or json
+-v, --verbose       Debug logging
 ```
 
 ---
 
-## CLI Reference
-
-```
-usage: okrscann [-h] -u URL [-m {GET,POST}] [-d POST_DATA] [-p PARAM]
-                [--scan-type {sqli,xss,lfi,redirect,cmdi,crlf,ssti,headers,all}] [--crawl]
-                [--payloads FILE] [--delay DELAY] [--headers HEADER ...]
-                [--cookies COOKIES] [--proxy URL] [--timeout N]
-                [--user-agent UA] [--follow-redirects]
-                [-o FILE] [--format {txt,json}] [-v] [--no-color]
-
-Target:
-  -u, --url           Target URL (include query params for GET)
-  -m, --method        HTTP method: GET or POST  (default: GET)
-  -d, --data          POST body  e.g. 'user=admin&pass=test'
-  -p, --param         Test only this parameter
-
-Scan options:
-  --scan-type         sqli | xss | lfi | redirect | cmdi | crlf | ssti | headers | all  (default: all)
-  --crawl             Auto-detect HTML forms on the page
-  --payloads FILE     Custom payload file (one per line, # = comment)
-  --delay FLOAT       Time-based threshold in seconds  (default: 5.0)
-
-HTTP options:
-  --headers           Extra HTTP headers
-  --cookies           Cookie string  e.g. 'session=abc; role=admin'
-  --proxy URL         Proxy  e.g. http://127.0.0.1:8080
-  --timeout N         Request timeout  (default: 10)
-  --user-agent UA     Custom User-Agent
-  --follow-redirects  Follow HTTP redirects
-
-Output:
-  -o, --output FILE   Save report to file
-  --format            txt | json  (default: txt)
-  -v, --verbose       Debug logging
-  --no-color          Disable ANSI colours
-```
-
----
-
-## Test Targets
-
-| Target | URL |
-|--------|-----|
-| DVWA | `docker run -p 80:80 vulnerables/web-dvwa` |
-| WebGoat | `docker run -p 8080:8080 webgoat/webgoat` |
-| bWAPP | `docker run -p 80:80 raesene/bwapp` |
-| HackTheBox / TryHackMe | Various web challenges |
-
----
-
-## Payload Reference
-
-### SQLi
-| Technique | Payload | Notes |
-|-----------|---------|-------|
-| Error-based | `1'` | Appended to numeric param -- syntax error |
-| Boolean blind | `1 AND 1=1` vs `1 AND 1=2` | AND-mode for numeric params |
-| Time (MySQL) | `1 AND SLEEP(5)--` | Delay-based detection |
-| Time (MSSQL) | `1; WAITFOR DELAY '0:0:5'--` | MSSQL delay |
-| Time (PgSQL) | `1; SELECT pg_sleep(5)--` | PostgreSQL delay |
-
-### XSS
-| Context | Payload |
-|---------|---------|
-| HTML | `<script>alert(1)</script>` |
-| HTML | `<img src=x onerror=alert(1)>` |
-| Attribute | `" onmouseover="alert(1)` |
-| Script block | `</script><script>alert(1)</script>` |
-
-### LFI
-| Technique | Payload |
-|-----------|---------|
-| Traversal | `../../../../etc/passwd` |
-| PHP filter | `php://filter/convert.base64-encode/resource=index.php` |
-| Null byte | `../../../etc/passwd%00` |
-| URL-encoded | `..%2F..%2F..%2Fetc%2Fpasswd` |
-
-### CMDi
-| Technique | Payload |
-|-----------|---------|
-| Semicolon | `; echo token` |
-| Pipe | `\| cat /etc/passwd` |
-| Backtick | `` `sleep 5` `` |
-| Subshell | `$(sleep 5)` |
-
-### SSTI
-| Engine | Payload | Expected |
-|--------|---------|----------|
-| Jinja2/Twig | `{{43*47}}` | `2021` |
-| Freemarker/Mako | `${43*47}` | `2021` |
-| ERB (Ruby) | `<%= 43*47 %>` | `2021` |
-| Smarty (PHP) | `{7*7}` | `49` |
-| Jinja2 string | `{{'okr'+'scn'}}` | `okrscn` |
-
-### CRLF Injection
-| Technique | Payload |
-|-----------|---------|
-| URL-encoded CRLF | `%0d%0aInjected: true` |
-| Double-encoded | `%250d%250aInjected: true` |
-| LF only | `%0aInjected: true` |
-| Set-Cookie injection | `%0d%0aSet-Cookie: test=injected` |
-| Body injection | `%0d%0a%0d%0a<tag>injected</tag>` |
-
-### Open Redirect
-| Technique | Payload |
-|-----------|---------|
-| Direct | `https://evil.com` |
-| Protocol-relative | `//evil.com` |
-| At-sign bypass | `https://legitimate.com@evil.com` |
-
-### Security Headers
-| Check | What it detects |
-|-------|-----------------|
-| Missing headers | CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy |
-| Info disclosure | Server/X-Powered-By version strings (Apache, Nginx, IIS, PHP, etc.) |
-| CORS misconfig | Wildcard origin, credentials=true escalation |
-
----
-
-## Running Tests
+## Tests
 
 ```bash
-pip install pytest
-python -m pytest tests/ -v
-```
-
-Expected: **92 passed**
-
----
-
-## Project Structure
-
-```
-vuln_scanner/
-  main.py                        CLI entry point
-  requirements.txt
-  scanner/
-    __init__.py                  Version info
-    banner.py                    ASCII art + branding
-    core.py                      Scan orchestration + WAF detection
-    http_client.py               requests wrapper (session, proxy, retry)
-    parser.py                    URL/form/POST parsing
-    reporter.py                  Console + JSON/TXT output
-    logger.py                    Logging setup
-    modules/
-      base.py                   Finding dataclass + BaseModule ABC
-      sqli.py                   SQL Injection (error/boolean/time)
-      xss.py                    XSS (reflected, context-aware)
-      lfi.py                    LFI (traversal + PHP wrappers)
-      cmdi.py                   OS Command Injection
-      open_redirect.py          Open Redirect
-      ssti.py                   Server-Side Template Injection
-      crlf.py                   CRLF Injection / Response Splitting
-      headers.py                Security Headers / Info Disclosure / CORS
-  payloads/
-    sqli.txt                    Reference SQLi payloads
-    xss.txt                     Reference XSS payloads
-    lfi.txt                     Reference LFI payloads
-    cmdi.txt                    Reference CMDi payloads
-    ssti.txt                    Reference SSTI payloads
-    crlf.txt                    Reference CRLF payloads
-    redirect.txt                Reference redirect payloads
-  tests/
-    test_sqli.py                SQLi tests (17)
-    test_xss.py                 XSS tests (12)
-    test_lfi.py                 LFI tests (11)
-    test_cmdi.py                CMDi tests (7)
-    test_redirect.py            Open Redirect tests (7)
-    test_ssti.py                SSTI tests (13)
-    test_crlf.py                CRLF Injection tests (10)
-    test_headers.py             Security Headers tests (13)
+python -m pytest tests/ -v     # 92 tests
 ```
 
 ---
 
 ## Extending
 
-To add a new module:
-
 1. Create `scanner/modules/mymodule.py` subclassing `BaseModule`
 2. Implement `scan_parameter(url, method, params, param_name) -> List[Finding]`
 3. Register in `scanner/core.py` `_MODULE_MAP`
-4. Add `--scan-type mymodule` to argparse choices in `main.py`
+4. Add to argparse choices in `main.py`
 
 ---
 
 ## Disclaimer
 
-**OkrScann is designed exclusively for legal and authorized security testing.**
+**OkrScann is for legal, authorized security testing only.**
 
-By downloading, installing, or using this software you agree to the following terms:
-
-1. **Authorized use only.** You may only use OkrScann against systems that you own or that you have **explicit, written authorization** to test. Unauthorized access to computer systems is a crime in virtually every jurisdiction (e.g. CFAA in the US, Computer Misuse Act in the UK, Art. 154-A of the Brazilian Penal Code).
-
-2. **No liability.** The author(s) of OkrScann provide this software **"as is"**, without warranty of any kind. The author(s) accept **no responsibility or liability** for any damage, data loss, legal consequences, or other harm that may result from the use or misuse of this tool — whether direct, indirect, incidental, or consequential.
-
-3. **Your responsibility.** You are solely responsible for ensuring that your use of OkrScann complies with all applicable local, state, national, and international laws and regulations. If you are unsure whether you are authorized to test a given target, **do not test it**.
-
-4. **Educational purpose.** This project was created as a learning exercise and portfolio piece to demonstrate offensive-security concepts. It is not intended to facilitate, encourage, or enable any illegal activity.
-
-5. **No guarantee of accuracy.** Scan results may contain false positives or false negatives. Always validate findings manually before including them in a professional report.
-
-**If you use this tool against systems without authorization, you do so at your own risk and the author bears zero responsibility for your actions.**
+1. **Authorized use only.** Only test systems you own or have explicit written permission to test. Unauthorized access is a crime (CFAA, Computer Misuse Act, Art. 154-A Brazilian Penal Code).
+2. **No liability.** The author provides this software "as is" with no warranty. The author accepts no responsibility for any damage or legal consequences from use or misuse.
+3. **Your responsibility.** Ensure compliance with all applicable laws before testing any target.
+4. **Educational purpose.** Created as a portfolio piece to demonstrate offensive-security concepts.
+5. **No accuracy guarantee.** Always validate findings manually before reporting.
 
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+[MIT License](LICENSE)

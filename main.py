@@ -162,6 +162,7 @@ def main() -> int:
         "timeout": args.timeout,
         "follow_redirects": args.follow_redirects,
         "verbose": args.verbose,
+        "no_color": args.no_color,
     }
 
     scanner = Scanner(config, logger)
