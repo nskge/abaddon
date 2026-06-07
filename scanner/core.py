@@ -99,11 +99,17 @@ _TECH_BODY_SIGS = [
     (r"content=\"Drupal", "Drupal"),
     (r"/__next/", "Next.js"),
     (r"/_nuxt/", "Nuxt.js"),
-    (r"react", "React"),
+    (r"react\.production\.min\.js", "React"),
+    (r"react-dom", "React"),
     (r"ng-version=", "Angular"),
-    (r"vue\.js", "Vue.js"),
-    (r"jquery", "jQuery"),
-    (r"bootstrap", "Bootstrap"),
+    (r"vue\.(?:min\.)?js", "Vue.js"),
+    (r"jquery[\.-]", "jQuery"),
+    (r"bootstrap[\.-]", "Bootstrap"),
+    (r"laravel", "Laravel"),
+    (r"csrf-token", "Rails/Laravel"),
+    (r"__vite", "Vite"),
+    (r"/_astro/", "Astro"),
+    (r"svelte", "Svelte"),
 ]
 
 
@@ -155,7 +161,8 @@ class Scanner:
 
         try:
             # -- Recon phase --
-            self._print_recon(url)
+            if not self.config.get("quiet", False):
+                self._print_recon(url)
 
             logger.info("Target  : %s [%s]", url, method)
             logger.info("Modules : %s", [cls.NAME for cls in self.module_classes])
@@ -225,13 +232,16 @@ class Scanner:
         except (socket.gaierror, OSError):
             pass
 
-        # Quick GET request for server info + fingerprinting
+        # Quick GET request for server info + fingerprinting + latency
         server = ""
         status = ""
+        latency_ms: Optional[float] = None
         techs: List[str] = []
         resp = None
         try:
+            t0 = time.monotonic()
             resp = self.http.get(url)
+            latency_ms = (time.monotonic() - t0) * 1000
             if resp is not None:
                 status = str(resp.status_code)
                 server = resp.headers.get("Server", "")
@@ -253,6 +263,9 @@ class Scanner:
             techs = [t for t in techs if t.lower() != server_lower]
         if techs:
             print(self._c("   | Tech     : ", _DIM) + self._c(", ".join(techs), _YELLOW))
+        if latency_ms is not None:
+            lat_color = _GREEN if latency_ms < 500 else (_YELLOW if latency_ms < 2000 else _RED)
+            print(self._c("   | Latency  : ", _DIM) + self._c(f"{latency_ms:.0f}ms", lat_color))
         print(self._c("   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
         print(self._c("   +----------------------", _DIM))
         print()

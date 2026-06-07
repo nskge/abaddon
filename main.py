@@ -117,6 +117,7 @@ Examples
     out.add_argument("-o", "--output", metavar="FILE", help="Save report to file")
     out.add_argument("--format", choices=["txt", "json"], default="txt", help="Report format  (default: txt)")
     out.add_argument("-v", "--verbose", action="store_true", help="Debug-level logging")
+    out.add_argument("-q", "--quiet", action="store_true", help="Minimal output -- findings only")
     out.add_argument("--no-color", action="store_true", help="Disable ANSI colours")
 
     return parser
@@ -126,11 +127,12 @@ def main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
-    # Print banner
+    # Print banner (suppressed in quiet mode)
     use_color = not args.no_color
-    print_banner(color=use_color)
+    if not args.quiet:
+        print_banner(color=use_color)
 
-    logger = setup_logger(verbose=args.verbose)
+    logger = setup_logger(verbose=args.verbose, quiet=args.quiet)
 
     # Build headers dict
     headers: dict = {}
@@ -167,6 +169,7 @@ def main() -> int:
         "follow_redirects": args.follow_redirects,
         "threads": args.threads,
         "verbose": args.verbose,
+        "quiet": args.quiet,
         "no_color": args.no_color,
     }
 

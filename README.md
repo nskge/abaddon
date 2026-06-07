@@ -84,6 +84,7 @@ python main.py -u "http://target/?id=1" -o report.json --format json
 -o, --output FILE   Save report to file
 --format            txt or json
 -v, --verbose       Debug logging
+-q, --quiet         Findings only (no banner/recon/info)
 ```
 
 ---

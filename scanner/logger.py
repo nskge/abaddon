@@ -4,21 +4,28 @@ import logging
 import sys
 
 
-def setup_logger(verbose: bool = False) -> logging.Logger:
+def setup_logger(verbose: bool = False, quiet: bool = False) -> logging.Logger:
     """Configure and return the application logger.
 
     Args:
         verbose: If True, emit DEBUG-level messages.
+        quiet: If True, only emit WARNING and above.
 
     Returns:
         Configured Logger instance.
     """
     logger = logging.getLogger("vulnscanner")
-    logger.setLevel(logging.DEBUG if verbose else logging.INFO)
+    if quiet:
+        level = logging.WARNING
+    elif verbose:
+        level = logging.DEBUG
+    else:
+        level = logging.INFO
+    logger.setLevel(level)
 
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setLevel(logging.DEBUG if verbose else logging.INFO)
+        handler.setLevel(level)
         formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)-8s %(message)s",
             datefmt="%H:%M:%S",
