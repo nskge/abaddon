@@ -171,9 +171,13 @@ def main() -> int:
     elapsed = time.monotonic() - t0
 
     reporter = Reporter(no_color=args.no_color)
-    reporter.print_summary(findings, elapsed=elapsed)
+    reporter.print_summary(
+        findings,
+        elapsed=elapsed,
+        interrupted=scanner._interrupted,
+    )
 
-    if args.output:
+    if args.output and findings:
         reporter.save_report(findings, args.output, args.format)
         logger.info("[+] Report saved: %s", args.output)
 

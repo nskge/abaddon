@@ -93,7 +93,13 @@ class Scanner:
             raise ValueError(f"Unknown scan type: {scan_type!r}")
 
     def run(self) -> List[Finding]:
-        """Execute the scan and return all findings."""
+        """Execute the scan and return all findings.
+
+        On ``KeyboardInterrupt`` (Ctrl+C) the scan stops gracefully and
+        returns every finding discovered so far so the reporter can still
+        display partial results.
+        """
+        self._interrupted = False
         t0 = time.monotonic()
         url = self.config["url"]
         method = self.config.get("method", "GET").upper()
@@ -101,46 +107,57 @@ class Scanner:
         target_param = self.config.get("param")
         crawl = self.config.get("crawl", False)
 
-        # -- Recon phase --
-        self._print_recon(url)
+        try:
+            # -- Recon phase --
+            self._print_recon(url)
 
-        logger.info("Target  : %s [%s]", url, method)
-        logger.info("Modules : %s", [cls.NAME for cls in self.module_classes])
+            logger.info("Target  : %s [%s]", url, method)
+            logger.info("Modules : %s", [cls.NAME for cls in self.module_classes])
 
-        baseline_resp = self._preflight_check(url, method, data_string)
+            baseline_resp = self._preflight_check(url, method, data_string)
 
-        targets = self._build_targets(url, method, data_string, target_param)
+            targets = self._build_targets(url, method, data_string, target_param)
 
-        if (not targets or crawl) and baseline_resp is not None:
-            form_targets = self._crawl_forms(url, baseline_resp, target_param)
-            if form_targets:
-                existing_keys = {(t["url"], t["method"], t["param_name"]) for t in targets}
-                for ft in form_targets:
-                    key = (ft["url"], ft["method"], ft["param_name"])
-                    if key not in existing_keys:
-                        targets.append(ft)
-                        existing_keys.add(key)
+            if (not targets or crawl) and baseline_resp is not None:
+                form_targets = self._crawl_forms(url, baseline_resp, target_param)
+                if form_targets:
+                    existing_keys = {(t["url"], t["method"], t["param_name"]) for t in targets}
+                    for ft in form_targets:
+                        key = (ft["url"], ft["method"], ft["param_name"])
+                        if key not in existing_keys:
+                            targets.append(ft)
+                            existing_keys.add(key)
 
-        if not targets:
+            if not targets:
+                logger.warning(
+                    "No injectable parameters found. "
+                    "Append query params to the URL (GET), supply --data (POST), "
+                    "or use --crawl to auto-detect HTML forms."
+                )
+                return self.findings
+
+            param_names = sorted({t["param_name"] for t in targets})
+            logger.info("Parameters: %s", param_names)
+
+            for target in targets:
+                self._scan_target(target)
+
+        except KeyboardInterrupt:
+            self._interrupted = True
+            print()  # newline after ^C
             logger.warning(
-                "No injectable parameters found. "
-                "Append query params to the URL (GET), supply --data (POST), "
-                "or use --crawl to auto-detect HTML forms."
+                "Scan interrupted by user (Ctrl+C). "
+                "Delivering %d finding(s) collected so far.",
+                len(self.findings),
             )
-            return self.findings
-
-        param_names = sorted({t["param_name"] for t in targets})
-        logger.info("Parameters: %s", param_names)
-
-        for target in targets:
-            self._scan_target(target)
 
         elapsed = time.monotonic() - t0
         n = len(self.findings)
-        logger.info(
-            "Scan complete -- %d finding%s in %.1fs.",
-            n, "" if n == 1 else "s", elapsed,
-        )
+        if not self._interrupted:
+            logger.info(
+                "Scan complete -- %d finding%s in %.1fs.",
+                n, "" if n == 1 else "s", elapsed,
+            )
         return self.findings
 
     # ------------------------------------------------------------------
@@ -332,16 +349,30 @@ class Scanner:
                 pool.submit(_run_module, cls): cls.NAME
                 for cls in self.module_classes
             }
-            for future in as_completed(futures):
-                mod_name = futures[future]
-                try:
-                    new_findings = future.result()
-                except Exception as exc:
-                    logger.debug("Module %s error: %s", mod_name, exc)
-                    continue
-                for f in new_findings:
-                    logger.info(
-                        "    [VULN] %s  param=%r  confidence=%s",
-                        f.vuln_type, f.parameter, f.confidence,
-                    )
-                self.findings.extend(new_findings)
+            try:
+                for future in as_completed(futures):
+                    mod_name = futures[future]
+                    try:
+                        new_findings = future.result()
+                    except Exception as exc:
+                        logger.debug("Module %s error: %s", mod_name, exc)
+                        continue
+                    for f in new_findings:
+                        logger.info(
+                            "    [VULN] %s  param=%r  confidence=%s",
+                            f.vuln_type, f.parameter, f.confidence,
+                        )
+                    self.findings.extend(new_findings)
+            except KeyboardInterrupt:
+                # Cancel futures that haven't started yet
+                for fut in futures:
+                    fut.cancel()
+                # Collect results from futures that already finished
+                for fut, mod_name in futures.items():
+                    if fut.done() and not fut.cancelled():
+                        try:
+                            for f in fut.result():
+                                self.findings.append(f)
+                        except Exception:
+                            pass
+                raise  # re-raise so the outer handler in run() catches it
