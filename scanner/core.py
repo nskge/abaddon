@@ -2,6 +2,7 @@
 
 import re
 import socket
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
@@ -266,6 +267,15 @@ class Scanner:
         if latency_ms is not None:
             lat_color = _GREEN if latency_ms < 500 else (_YELLOW if latency_ms < 2000 else _RED)
             print(self._c("   | Latency  : ", _DIM) + self._c(f"{latency_ms:.0f}ms", lat_color))
+        if resp is not None:
+            size = len(resp.text)
+            if size > 1024 * 1024:
+                size_str = f"{size / (1024*1024):.1f} MB"
+            elif size > 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size} B"
+            print(self._c("   | Size     : ", _DIM) + self._c(size_str, _CYAN))
         print(self._c("   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
         print(self._c("   +----------------------", _DIM))
         print()
@@ -432,8 +442,11 @@ class Scanner:
                 for cls in self.module_classes
             }
             try:
+                total_mods = len(futures)
+                done_count = 0
                 for future in as_completed(futures):
                     mod_name = futures[future]
+                    done_count += 1
                     try:
                         new_findings = future.result()
                     except Exception as exc:
@@ -449,6 +462,17 @@ class Scanner:
                             f.vuln_type, f.parameter, f.confidence,
                         )
                         self.findings.append(f)
+                    # Inline progress (overwrite same line)
+                    if not self.config.get("quiet", False) and sys.stdout.isatty():
+                        bar = "#" * done_count + "-" * (total_mods - done_count)
+                        sys.stdout.write(
+                            f"\r    [{bar}] {done_count}/{total_mods} {mod_name} done  "
+                        )
+                        sys.stdout.flush()
+                # Clear the progress line
+                if not self.config.get("quiet", False) and sys.stdout.isatty():
+                    sys.stdout.write("\r" + " " * 60 + "\r")
+                    sys.stdout.flush()
             except KeyboardInterrupt:
                 # Cancel futures that haven't started yet
                 for fut in futures:
