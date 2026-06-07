@@ -58,8 +58,53 @@ _YELLOW = "\033[93m"
 _RED = "\033[91m"
 _RESET = "\033[0m"
 
-# Max parallel module threads per parameter
-_MAX_WORKERS = 4
+# Default parallel module threads per parameter (overridden by --threads)
+_DEFAULT_WORKERS = 4
+
+# ---------------------------------------------------------------------------
+# Technology fingerprints (header + body patterns)
+# ---------------------------------------------------------------------------
+_TECH_HEADER_SIGS = [
+    ("X-Powered-By", r"PHP", "PHP"),
+    ("X-Powered-By", r"ASP\.NET", "ASP.NET"),
+    ("X-Powered-By", r"Express", "Express.js"),
+    ("X-Powered-By", r"Servlet", "Java Servlet"),
+    ("X-Generator", r"WordPress", "WordPress"),
+    ("X-Generator", r"Drupal", "Drupal"),
+    ("X-Drupal-Cache", r".", "Drupal"),
+    ("Server", r"Apache", "Apache"),
+    ("Server", r"nginx", "Nginx"),
+    ("Server", r"Microsoft-IIS", "IIS"),
+    ("Server", r"Werkzeug", "Flask/Werkzeug"),
+    ("Server", r"gunicorn", "Gunicorn/Python"),
+    ("Server", r"cloudflare", "Cloudflare"),
+    ("Server", r"LiteSpeed", "LiteSpeed"),
+    ("Set-Cookie", r"PHPSESSID", "PHP"),
+    ("Set-Cookie", r"JSESSIONID", "Java"),
+    ("Set-Cookie", r"ASP\.NET_SessionId", "ASP.NET"),
+    ("Set-Cookie", r"csrftoken", "Django"),
+    ("Set-Cookie", r"laravel_session", "Laravel"),
+    ("Set-Cookie", r"rack\.session", "Ruby/Rack"),
+    ("Set-Cookie", r"connect\.sid", "Node.js/Express"),
+]
+
+_TECH_BODY_SIGS = [
+    (r"wp-content/", "WordPress"),
+    (r"wp-includes/", "WordPress"),
+    (r"/wp-json/", "WordPress"),
+    (r"Joomla!", "Joomla"),
+    (r"sites/default/files", "Drupal"),
+    (r"content=\"WordPress", "WordPress"),
+    (r"content=\"Joomla", "Joomla"),
+    (r"content=\"Drupal", "Drupal"),
+    (r"/__next/", "Next.js"),
+    (r"/_nuxt/", "Nuxt.js"),
+    (r"react", "React"),
+    (r"ng-version=", "Angular"),
+    (r"vue\.js", "Vue.js"),
+    (r"jquery", "jQuery"),
+    (r"bootstrap", "Bootstrap"),
+]
 
 
 class Scanner:
@@ -74,6 +119,7 @@ class Scanner:
     def __init__(self, config: Dict, app_logger=None) -> None:
         self.config = config
         self.findings: List[Finding] = []
+        self._seen_keys: set = set()  # dedup: (vuln_type, url, param, payload)
         self._no_color = config.get("no_color", False)
 
         self.http = HTTPClient(
@@ -179,34 +225,56 @@ class Scanner:
         except (socket.gaierror, OSError):
             pass
 
-        # Quick HEAD request for server info
+        # Quick GET request for server info + fingerprinting
         server = ""
-        tech = ""
         status = ""
+        techs: List[str] = []
+        resp = None
         try:
             resp = self.http.get(url)
             if resp is not None:
                 status = str(resp.status_code)
                 server = resp.headers.get("Server", "")
-                xpow = resp.headers.get("X-Powered-By", "")
-                if xpow:
-                    tech = xpow
+                techs = self._fingerprint(resp)
         except Exception:
             pass
 
         print(self._c("   +--- Target Recon ---", _DIM))
-        print(self._c(f"   | Host     : ", _DIM) + self._c(hostname, _CYAN + _BOLD))
-        print(self._c(f"   | IP       : ", _DIM) + self._c(ip, _CYAN))
+        print(self._c("   | Host     : ", _DIM) + self._c(hostname, _CYAN + _BOLD))
+        print(self._c("   | IP       : ", _DIM) + self._c(ip, _CYAN))
         if status:
             sc = _GREEN if status.startswith("2") else (_YELLOW if status.startswith("3") else _RED)
-            print(self._c(f"   | Status   : ", _DIM) + self._c(f"HTTP {status}", sc))
+            print(self._c("   | Status   : ", _DIM) + self._c(f"HTTP {status}", sc))
         if server:
-            print(self._c(f"   | Server   : ", _DIM) + self._c(server, _YELLOW))
-        if tech:
-            print(self._c(f"   | Tech     : ", _DIM) + self._c(tech, _YELLOW))
-        print(self._c(f"   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
+            print(self._c("   | Server   : ", _DIM) + self._c(server, _YELLOW))
+        # Remove techs already shown via Server header to avoid redundancy
+        if server and techs:
+            server_lower = server.lower().split("/")[0].strip()
+            techs = [t for t in techs if t.lower() != server_lower]
+        if techs:
+            print(self._c("   | Tech     : ", _DIM) + self._c(", ".join(techs), _YELLOW))
+        print(self._c("   | Scheme   : ", _DIM) + self._c(parsed.scheme.upper(), _CYAN))
         print(self._c("   +----------------------", _DIM))
         print()
+
+    @staticmethod
+    def _fingerprint(resp) -> List[str]:
+        """Detect technologies from response headers and body patterns."""
+        detected = set()
+
+        # Header-based detection
+        for header_name, pattern, tech_name in _TECH_HEADER_SIGS:
+            value = resp.headers.get(header_name, "")
+            if value and re.search(pattern, value, re.IGNORECASE):
+                detected.add(tech_name)
+
+        # Body-based detection (only first 50KB to stay fast)
+        body = resp.text[:51200].lower()
+        for pattern, tech_name in _TECH_BODY_SIGS:
+            if re.search(pattern, body, re.IGNORECASE):
+                detected.add(tech_name)
+
+        return sorted(detected)
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -344,7 +412,8 @@ class Scanner:
             return module.scan_parameter(url, method, params, param_name)
 
         # Run modules concurrently for speed
-        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as pool:
+        max_workers = self.config.get("threads", _DEFAULT_WORKERS)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_run_module, cls): cls.NAME
                 for cls in self.module_classes
@@ -358,11 +427,15 @@ class Scanner:
                         logger.debug("Module %s error: %s", mod_name, exc)
                         continue
                     for f in new_findings:
+                        key = (f.vuln_type, f.url, f.parameter, f.payload)
+                        if key in self._seen_keys:
+                            continue
+                        self._seen_keys.add(key)
                         logger.info(
                             "    [VULN] %s  param=%r  confidence=%s",
                             f.vuln_type, f.parameter, f.confidence,
                         )
-                    self.findings.extend(new_findings)
+                        self.findings.append(f)
             except KeyboardInterrupt:
                 # Cancel futures that haven't started yet
                 for fut in futures:
@@ -372,7 +445,10 @@ class Scanner:
                     if fut.done() and not fut.cancelled():
                         try:
                             for f in fut.result():
-                                self.findings.append(f)
+                                key = (f.vuln_type, f.url, f.parameter, f.payload)
+                                if key not in self._seen_keys:
+                                    self._seen_keys.add(key)
+                                    self.findings.append(f)
                         except Exception:
                             pass
                 raise  # re-raise so the outer handler in run() catches it

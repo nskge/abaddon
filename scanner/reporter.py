@@ -128,7 +128,13 @@ class Reporter:
         print(stats)
         print()
 
-        for idx, f in enumerate(findings, 1):
+        # Sort: HIGH first, then MEDIUM, then LOW
+        _severity_order = {"high": 0, "medium": 1, "low": 2}
+        sorted_findings = sorted(
+            findings, key=lambda f: _severity_order.get(f.confidence, 3),
+        )
+
+        for idx, f in enumerate(sorted_findings, 1):
             conf_c = _CONF_COLOR.get(f.confidence, "")
             type_c = _color_for_type(f.vuln_type)
             icon   = _CONF_ICON.get(f.confidence, "[!]")

@@ -29,7 +29,7 @@ Built for speed, accuracy, and real-world pentest reports.
 | **Redirect** | Open redirect via Location header, meta-refresh, JavaScript |
 | **Headers** | Missing security headers, server version disclosure, CORS misconfig |
 
-**Key features:** target recon (IP/server/tech), auto-crawl forms, WAF detection, concurrent scanning, reproduction steps with curl commands, JSON/TXT export, 92 unit tests.
+**Key features:** target recon (IP/server/tech fingerprinting), auto-crawl forms, WAF detection, concurrent scanning (configurable threads), finding deduplication, reproduction steps with curl commands, JSON/TXT export, 92 unit tests.
 
 ---
 
@@ -79,6 +79,7 @@ python main.py -u "http://target/?id=1" -o report.json --format json
 --payloads FILE     Custom payload file
 --cookies           Cookie string
 --proxy URL         HTTP proxy
+--threads N         Concurrent module threads (default: 4)
 --timeout N         Request timeout (default: 10s)
 -o, --output FILE   Save report to file
 --format            txt or json

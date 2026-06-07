@@ -92,6 +92,10 @@ Examples
         "--delay", type=float, default=5.0,
         help="Time-based detection threshold in seconds  (default: 5.0)",
     )
+    scan.add_argument(
+        "--threads", type=int, default=4, metavar="N",
+        help="Max concurrent module threads per parameter  (default: 4)",
+    )
 
     # ---- HTTP ----
     http = parser.add_argument_group("HTTP options")
@@ -161,6 +165,7 @@ def main() -> int:
         "proxy": args.proxy,
         "timeout": args.timeout,
         "follow_redirects": args.follow_redirects,
+        "threads": args.threads,
         "verbose": args.verbose,
         "no_color": args.no_color,
     }
