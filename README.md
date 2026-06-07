@@ -31,6 +31,7 @@
 
 **Additional capabilities**
 
+- **Reproduction steps**: every finding includes manual verification instructions (curl commands, evidence grep patterns, escalation hints) -- a ready-made PoC for your pentest report
 - Auto-crawl: `--crawl` auto-detects HTML forms on the page (no need to know field names or method)
 - WAF detection: warns when Cloudflare/Incapsula/ModSecurity is blocking requests
 - Session-based HTTP client with custom headers, cookies, proxy support (Burp Suite)

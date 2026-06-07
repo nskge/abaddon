@@ -137,7 +137,7 @@ class Reporter:
             if f.details:
                 print()
                 for sentence in f.details.split(". "):
-                    sentence = sentence.strip()
+                    sentence = sentence.strip().rstrip(".")
                     if sentence:
                         if sentence.startswith("Remediation"):
                             print(self._c(f"      > {sentence}.", GREEN))
