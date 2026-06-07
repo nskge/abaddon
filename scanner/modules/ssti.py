@@ -20,7 +20,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -220,8 +220,8 @@ class SSTIScanner(BaseModule):
 
         return True, f"Template evaluated: {payload} -> {expected} in response: ...{snippet!r}..."
 
-    @staticmethod
     def _make_finding(
+        self,
         url: str,
         method: str,
         param_name: str,
@@ -232,6 +232,8 @@ class SSTIScanner(BaseModule):
         phase: str,
     ) -> Finding:
         confidence = "high" if phase == "unique-math" else "medium"
+        params = {param_name: payload}
+        curl = build_curl_command(url, method, params, param_name, payload)
         return Finding(
             vuln_type=f"Server-Side Template Injection (SSTI)",
             url=url,
@@ -246,5 +248,15 @@ class SSTIScanner(BaseModule):
                 f"SSTI can lead to Remote Code Execution (RCE). "
                 f"Remediation: never pass user input into template render calls; "
                 f"use sandboxed template environments."
+            ),
+            reproduction=(
+                f"# 1. Send the math expression and check if the server evaluates it:\n"
+                f"{curl}\n"
+                f"# 2. Search for '{expected}' in the response body.\n"
+                f"#    If present AND the raw template '{payload}' is NOT present,\n"
+                f"#    the server evaluated the expression (SSTI confirmed).\n"
+                f"# 3. Engine hint: {engine}. Try escalation payloads:\n"
+                f"#    Jinja2 RCE: {{{{config.__class__.__init__.__globals__['os'].popen('id').read()}}}}\n"
+                f"#    Twig RCE:   {{{{_self.env.registerUndefinedFilterCallback('exec')}}}}{{{{_self.env.getFilter('id')}}}}"
             ),
         )

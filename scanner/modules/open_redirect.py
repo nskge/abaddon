@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -73,7 +73,7 @@ class OpenRedirectScanner(BaseModule):
             if resp is None:
                 continue
 
-            finding = self._check_redirect(resp, url, method, param_name, payload)
+            finding = self._check_redirect(resp, url, method, params, param_name, payload)
             if finding:
                 # Restore original follow-redirects setting
                 self.http.follow_redirects = self._orig_follow
@@ -82,7 +82,7 @@ class OpenRedirectScanner(BaseModule):
         self.http.follow_redirects = self._orig_follow
         return []
 
-    def _check_redirect(self, resp, url, method, param_name, payload) -> Optional[Finding]:
+    def _check_redirect(self, resp, url, method, params, param_name, payload) -> Optional[Finding]:
         """Validate if the response redirects to our canary domain."""
         # Check Location header on 3xx
         if 300 <= resp.status_code < 400:
@@ -92,6 +92,7 @@ class OpenRedirectScanner(BaseModule):
                     "[Redirect] %s=%r -> Location: %s (HTTP %d)",
                     param_name, payload, location, resp.status_code,
                 )
+                curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="Open Redirect",
                     url=url,
@@ -109,6 +110,14 @@ class OpenRedirectScanner(BaseModule):
                         "Remediation: validate redirect targets against an allow-list "
                         "of trusted domains; use relative paths only."
                     ),
+                    reproduction=(
+                        f"# 1. Send the redirect payload and check the Location header:\n"
+                        f"{curl.replace('curl -s', 'curl -s -D -')} -o /dev/null | head -20\n"
+                        f"# 2. Look for 'Location:' header pointing to {_CANARY_DOMAIN}.\n"
+                        f"#    If present, the server redirects to an attacker-controlled domain.\n"
+                        f"# 3. In a browser: paste the full URL and observe the redirect.\n"
+                        f"# 4. Replace '{_CANARY_DOMAIN}' with your own domain for PoC."
+                    ),
                 )
 
         # Check meta-refresh / JS redirect in body
@@ -121,6 +130,7 @@ class OpenRedirectScanner(BaseModule):
         ]
 
         if re.search(meta_pattern, body, re.IGNORECASE):
+            curl = build_curl_command(url, method, params, param_name, payload)
             return Finding(
                 vuln_type="Open Redirect (Meta Refresh)",
                 url=url,
@@ -130,10 +140,18 @@ class OpenRedirectScanner(BaseModule):
                 evidence=f"Meta-refresh redirect to {_CANARY_DOMAIN} found in response body",
                 confidence="high",
                 details="Remediation: validate redirect targets against an allow-list.",
+                reproduction=(
+                    f"# 1. Send the payload and inspect the HTML body:\n"
+                    f"{curl}\n"
+                    f"# 2. Search for '<meta http-equiv=\"refresh\"' pointing to {_CANARY_DOMAIN}.\n"
+                    f"#    If present, the server embeds a client-side redirect to an external domain.\n"
+                    f"# 3. Open the URL in a browser to see the redirect happen."
+                ),
             )
 
         for pat in js_patterns:
             if re.search(pat, body, re.IGNORECASE):
+                curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="Open Redirect (JavaScript)",
                     url=url,
@@ -143,6 +161,13 @@ class OpenRedirectScanner(BaseModule):
                     evidence=f"JavaScript redirect to {_CANARY_DOMAIN} found in response body",
                     confidence="medium",
                     details="Remediation: validate redirect targets against an allow-list.",
+                    reproduction=(
+                        f"# 1. Send the payload and check response body for JS redirect:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for 'window.location' or 'location.href' pointing\n"
+                        f"#    to {_CANARY_DOMAIN} in the response.\n"
+                        f"# 3. Open the URL in a browser with JS enabled to confirm redirect."
+                    ),
                 )
 
         return None

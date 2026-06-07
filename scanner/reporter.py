@@ -143,6 +143,22 @@ class Reporter:
                             print(self._c(f"      > {sentence}.", GREEN))
                         else:
                             print(self._c(f"      {sentence}.", DIM))
+
+            if f.reproduction:
+                print()
+                print(self._c("      -- How to verify manually --", BOLD + YELLOW))
+                for line in f.reproduction.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        print()
+                    elif line.startswith("$"):
+                        # Shell command — highlight it
+                        print(self._c(f"      {line}", WHITE + BOLD))
+                    elif line.startswith("#"):
+                        # Comment / step header
+                        print(self._c(f"      {line}", YELLOW))
+                    else:
+                        print(self._c(f"      {line}", DIM))
             print()
 
         print(sep)
@@ -211,6 +227,10 @@ class Reporter:
             ]
             if f.details:
                 lines.append(f"    Details    : {f.details}")
+            if f.reproduction:
+                lines.append(f"    Reproduce  :")
+                for rline in f.reproduction.strip().split("\n"):
+                    lines.append(f"                 {rline.strip()}")
             lines.append("")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines))

@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -115,19 +115,30 @@ class CommandInjectionScanner(BaseModule):
 
             # Check for echo token
             if _ECHO_TOKEN in body:
+                full_payload = f"{params.get(param_name, '')}{payload}"
+                curl = build_curl_command(url, method, params, param_name, full_payload)
                 logger.debug("[CMDi/Output] %s: echo token found (%s)", param_name, desc)
                 return Finding(
                     vuln_type="OS Command Injection (Output-based)",
                     url=url,
                     method=method,
                     parameter=param_name,
-                    payload=f"{params.get(param_name, '')}{payload}",
+                    payload=full_payload,
                     evidence=f"Echo token '{_ECHO_TOKEN}' reflected in response ({desc})",
                     confidence="high",
                     details=(
                         f"Command injection via {desc}. Injected command output appears "
                         "in the HTTP response. Remediation: never pass user input to "
                         "shell commands; use language-native APIs instead of system()."
+                    ),
+                    reproduction=(
+                        f"# 1. Inject the command and look for the token in the response:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for '{_ECHO_TOKEN}' in the output.\n"
+                        f"#    If present, the server executed your echo command.\n"
+                        f"# 3. Escalate with 'id' or 'whoami' to prove RCE:\n"
+                        f"{build_curl_command(url, method, params, param_name, params.get(param_name, '') + '; id')}\n"
+                        f"# 4. Look for output like 'uid=33(www-data)' to confirm OS access."
                     ),
                 )
 
@@ -136,17 +147,27 @@ class CommandInjectionScanner(BaseModule):
                 for sig in _PASSWD_SIGS:
                     if re.search(sig, body):
                         logger.debug("[CMDi/Output] %s: passwd content found (%s)", param_name, desc)
+                        full_pl = f"{params.get(param_name, '')}{payload}"
+                        curl = build_curl_command(url, method, params, param_name, full_pl)
                         return Finding(
                             vuln_type="OS Command Injection (Output-based)",
                             url=url,
                             method=method,
                             parameter=param_name,
-                            payload=f"{params.get(param_name, '')}{payload}",
+                            payload=full_pl,
                             evidence=f"/etc/passwd content detected in response ({desc})",
                             confidence="high",
                             details=(
                                 "Command injection reading /etc/passwd. "
                                 "Remediation: avoid system() / exec(); validate all inputs."
+                            ),
+                            reproduction=(
+                                f"# 1. Send the payload to read /etc/passwd:\n"
+                                f"{curl}\n"
+                                f"# 2. Look for 'root:x:0:0:' in the response body.\n"
+                                f"#    If present, the server executed 'cat /etc/passwd'.\n"
+                                f"# 3. Confirm with 'id' command:\n"
+                                f"{build_curl_command(url, method, params, param_name, params.get(param_name, '') + '; id')}"
                             ),
                         )
         return None
@@ -181,6 +202,7 @@ class CommandInjectionScanner(BaseModule):
                     "[CMDi/Time] %s=%r elapsed=%.2fs baseline=%.2fs (%s)",
                     param_name, display, elapsed, baseline_time, os_hint,
                 )
+                curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
                     vuln_type="OS Command Injection (Time-based)",
                     url=url,
@@ -195,6 +217,14 @@ class CommandInjectionScanner(BaseModule):
                     details=(
                         f"Time-based command injection ({os_hint}). "
                         "Remediation: never pass user input to shell commands."
+                    ),
+                    reproduction=(
+                        f"# 1. Measure baseline response time:\n"
+                        f"$ time {build_curl_command(url, method, params, param_name, params.get(param_name, '')).lstrip('$ ')}\n"
+                        f"# 2. Send the sleep payload and measure:\n"
+                        f"$ time {curl.lstrip('$ ')}\n"
+                        f"# 3. If the second request takes ~{delay_sec}s longer,\n"
+                        f"#    it confirms time-based command injection ({os_hint})."
                     ),
                 )
         return None

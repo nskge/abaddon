@@ -16,7 +16,7 @@ from typing import Dict, List, Optional
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -122,7 +122,7 @@ class LFIScanner(BaseModule):
             if resp is None:
                 continue
 
-            finding = self._validate(resp.text, payload, url, method, param_name)
+            finding = self._validate(resp.text, payload, url, method, params, param_name)
             if finding:
                 return [finding]
 
@@ -138,13 +138,14 @@ class LFIScanner(BaseModule):
         payload: str,
         url: str,
         method: str,
+        params: Dict[str, str],
         param_name: str,
     ) -> Optional[Finding]:
         """Check the response body for file-read evidence."""
 
         # PHP filter wrapper — expect base64-encoded source
         if "php://filter" in payload.lower() and "base64-encode" in payload.lower():
-            finding = self._check_php_filter(body, payload, url, method, param_name)
+            finding = self._check_php_filter(body, payload, url, method, params, param_name)
             if finding:
                 return finding
 
@@ -157,6 +158,7 @@ class LFIScanner(BaseModule):
                         "[LFI] %s=%r matched signature for %s",
                         param_name, payload, target_file,
                     )
+                    curl = build_curl_command(url, method, params, param_name, payload)
                     return Finding(
                         vuln_type="Local File Inclusion (LFI)",
                         url=url,
@@ -174,6 +176,18 @@ class LFIScanner(BaseModule):
                             "Remediation: validate/restrict file path inputs; "
                             "use an allow-list for permitted resources."
                         ),
+                        reproduction=(
+                            f"# 1. Send the path traversal payload:\n"
+                            f"{curl}\n"
+                            f"# 2. Search for file content signatures in the response:\n"
+                            f"$ # Grep for: {pattern}\n"
+                            f"# 3. If content from {target_file} appears (e.g. 'root:x:0:0:'),\n"
+                            f"#    the server is reading arbitrary files via path traversal.\n"
+                            f"# 4. Escalate: try reading sensitive config files:\n"
+                            f"#    Linux:   /etc/shadow, /proc/self/environ, /var/log/auth.log\n"
+                            f"#    Windows: C:\\boot.ini, C:\\inetpub\\logs\\LogFiles\n"
+                            f"#    Web:     ../config.php, ../wp-config.php, ../.env"
+                        ),
                     )
 
         return None
@@ -184,6 +198,7 @@ class LFIScanner(BaseModule):
         payload: str,
         url: str,
         method: str,
+        params: Dict[str, str],
         param_name: str,
     ) -> Optional[Finding]:
         """Try to base64-decode large blobs in the response and look for PHP code."""
@@ -202,6 +217,7 @@ class LFIScanner(BaseModule):
                 logger.debug(
                     "[LFI/PHP-Filter] %s: base64 PHP source decoded", param_name
                 )
+                curl = build_curl_command(url, method, {param_name: payload}, param_name, payload)
                 return Finding(
                     vuln_type="Local File Inclusion (LFI — PHP Filter)",
                     url=url,
@@ -215,6 +231,18 @@ class LFIScanner(BaseModule):
                         f"source file. Decoded preview: {preview[:120]!r}. "
                         "Remediation: disable php:// stream wrappers for user input; "
                         "whitelist allowed resources."
+                    ),
+                    reproduction=(
+                        f"# 1. Send the php://filter payload to extract source code:\n"
+                        f"{curl}\n"
+                        f"# 2. Copy the base64 blob from the response and decode it:\n"
+                        f"$ echo '<base64_blob>' | base64 -d\n"
+                        f"# 3. If you see PHP source code (<?php), the server is reading\n"
+                        f"#    files via the php://filter wrapper (LFI confirmed).\n"
+                        f"# 4. Escalate: read sensitive files:\n"
+                        f"#    php://filter/convert.base64-encode/resource=config.php\n"
+                        f"#    php://filter/convert.base64-encode/resource=../wp-config.php\n"
+                        f"#    php://filter/convert.base64-encode/resource=.env"
                     ),
                 )
         return None

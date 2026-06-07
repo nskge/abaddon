@@ -21,7 +21,7 @@ from typing import Dict, List, Optional
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -130,6 +130,7 @@ class CRLFScanner(BaseModule):
         # Check 1: injected header in response headers
         for header_name in resp.headers:
             if _MARKER_HEADER.lower() in header_name.lower():
+                curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="CRLF Injection (Header Injection)",
                     url=url,
@@ -148,11 +149,19 @@ class CRLFScanner(BaseModule):
                         f"Remediation: strip or reject CR/LF characters in all "
                         f"user input that flows into HTTP headers or redirects."
                     ),
+                    reproduction=(
+                        f"# 1. Send the CRLF payload and inspect response headers:\n"
+                        f"{curl.replace('curl -s', 'curl -s -D -')} | head -20\n"
+                        f"# 2. Look for the injected header '{_MARKER_HEADER}' in the output.\n"
+                        f"#    If present, the server didn't sanitize CR/LF characters.\n"
+                        f"# 3. Escalate: inject Set-Cookie to prove session fixation."
+                    ),
                 )
 
         # Check 2: Set-Cookie injection
         set_cookie = resp.headers.get("Set-Cookie", "")
         if "okrtest=injected" in set_cookie:
+            curl = build_curl_command(url, method, params, param_name, payload)
             return Finding(
                 vuln_type="CRLF Injection (Set-Cookie Injection)",
                 url=url,
@@ -166,11 +175,18 @@ class CRLFScanner(BaseModule):
                     f"headers, enabling session fixation attacks. "
                     f"Remediation: sanitize CR/LF from user input in header values."
                 ),
+                reproduction=(
+                    f"# 1. Send the payload and check for the injected cookie:\n"
+                    f"{curl.replace('curl -s', 'curl -s -D -')} | head -20\n"
+                    f"# 2. Look for 'Set-Cookie: okrtest=injected' in response headers.\n"
+                    f"#    If present, an attacker can fixate sessions via CRLF injection."
+                ),
             )
 
         # Check 3: body injection marker
         for marker in _BODY_MARKERS:
             if marker in resp.text:
+                curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="CRLF Injection (Response Splitting)",
                     url=url,
@@ -184,6 +200,14 @@ class CRLFScanner(BaseModule):
                         f"arbitrary content into the HTTP response body. This can "
                         f"lead to XSS and cache poisoning. "
                         f"Remediation: reject CR/LF characters in user input."
+                    ),
+                    reproduction=(
+                        f"# 1. Send the CRLF payload:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for '{marker}' in the response body.\n"
+                        f"#    If present, CRLF characters broke out of headers into the body.\n"
+                        f"# 3. This proves response splitting -- an attacker can inject\n"
+                        f"#    arbitrary HTML/JS into the response."
                     ),
                 )
 

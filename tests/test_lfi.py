@@ -176,7 +176,7 @@ class TestLFIPHPFilter(unittest.TestCase):
 
         finding = LFIScanner._check_php_filter(
             body, "php://filter/convert.base64-encode/resource=x",
-            "http://target.local/", "GET", "file",
+            "http://target.local/", "GET", {"file": "test"}, "file",
         )
 
         self.assertIsNone(finding)

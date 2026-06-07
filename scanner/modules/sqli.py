@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import rebuild_url_with_params
+from ..parser import build_curl_command, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -252,6 +252,7 @@ class SQLiScanner(BaseModule):
                     "[SQLi/Error] %s=%r matched pattern=%r (%s)",
                     param_name, display_payload, pattern, dbms,
                 )
+                curl = build_curl_command(url, method, injected_params, param_name, display_payload)
                 return Finding(
                     vuln_type="SQL Injection (Error-based)",
                     url=url,
@@ -264,6 +265,23 @@ class SQLiScanner(BaseModule):
                         f"{dbms} error exposed in HTTP response. "
                         f"Payload: {display_payload!r}. "
                         "Remediation: use parameterised queries / prepared statements."
+                    ),
+                    reproduction=(
+                        f"# 1. Send the payload and look for DB error in the response:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for the error pattern in the output:\n"
+                        f"$ # Look for: {pattern!r}\n"
+                        f"# 3. If the {dbms} error message appears, the param is injectable.\n"
+                        f"# 4. Try sqlmap for automated exploitation:\n"
+                        f"$ sqlmap -u \"{url}\" --data \"{param_name}={display_payload}\" --batch"
+                        if method == "POST" else
+                        f"# 1. Send the payload and look for DB error in the response:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for the error pattern in the output:\n"
+                        f"$ # Look for: {pattern!r}\n"
+                        f"# 3. If the {dbms} error message appears, the param is injectable.\n"
+                        f"# 4. Try sqlmap for automated exploitation:\n"
+                        f"$ sqlmap -u \"{url}?{param_name}={display_payload}\" --batch"
                     ),
                 )
         return None
@@ -363,6 +381,8 @@ class SQLiScanner(BaseModule):
                 "[SQLi/Boolean/%s] %s: baseline=%d true=%d false=%d diff=%d",
                 kind, param_name, baseline_len, t_len, f_len, diff,
             )
+            curl_true = build_curl_command(url, method, {param_name: ""}, param_name, true_pl)
+            curl_false = build_curl_command(url, method, {param_name: ""}, param_name, false_pl)
             return Finding(
                 vuln_type="SQL Injection (Boolean-based Blind)",
                 url=url,
@@ -378,6 +398,16 @@ class SQLiScanner(BaseModule):
                     f"Boolean-based blind SQLi ({kind} pattern). "
                     f"Baseline: {baseline_len} B | TRUE: {t_len} B | FALSE: {f_len} B. "
                     "Remediation: use parameterised queries / prepared statements."
+                ),
+                reproduction=(
+                    f"# 1. Send the TRUE condition and note the response size:\n"
+                    f"{curl_true}\n"
+                    f"# 2. Send the FALSE condition and compare:\n"
+                    f"{curl_false}\n"
+                    f"# 3. If TRUE returns ~{t_len} bytes and FALSE returns ~{f_len} bytes,\n"
+                    f"#    the difference ({diff} bytes) confirms blind SQLi.\n"
+                    f"# 4. Pipe through 'wc -c' to count bytes:\n"
+                    f"$ # {curl_true.lstrip('$ ')} | wc -c"
                 ),
             )
         return None
@@ -424,6 +454,7 @@ class SQLiScanner(BaseModule):
                     "[SQLi/Time] %s=%r elapsed=%.2fs baseline=%.2fs (%s)",
                     param_name, display, elapsed, baseline_time, dbms,
                 )
+                curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
                     vuln_type="SQL Injection (Time-based Blind)",
                     url=url,
@@ -439,6 +470,15 @@ class SQLiScanner(BaseModule):
                         f"Time-based blind SQLi ({dbms}): payload caused {elapsed:.2f}s "
                         f"delay vs {baseline_time:.2f}s baseline. "
                         "Remediation: use parameterised queries / prepared statements."
+                    ),
+                    reproduction=(
+                        f"# 1. Measure baseline response time:\n"
+                        f"$ time {build_curl_command(url, method, params, param_name, params.get(param_name, '')).lstrip('$ ')}\n"
+                        f"# 2. Send the time-based payload and measure delay:\n"
+                        f"$ time {curl.lstrip('$ ')}\n"
+                        f"# 3. If the second request takes ~{delay_sec}s longer than baseline,\n"
+                        f"#    it confirms time-based blind SQLi ({dbms}).\n"
+                        f"# Expected: baseline ~{baseline_time:.1f}s vs payload ~{elapsed:.1f}s"
                     ),
                 )
         return None

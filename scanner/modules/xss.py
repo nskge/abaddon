@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
-from ..parser import inject_into_params, rebuild_url_with_params
+from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
 
@@ -190,6 +190,7 @@ class XSSScanner(BaseModule):
                     "[XSS] %s=%r reflected unencoded in %s context",
                     param_name, payload, context,
                 )
+                curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="Cross-Site Scripting (Reflected XSS)",
                     url=url,
@@ -203,6 +204,17 @@ class XSSScanner(BaseModule):
                         f"Payload: {payload!r}. "
                         "Remediation: HTML-encode all user-supplied output; "
                         "apply a strict Content-Security-Policy."
+                    ),
+                    reproduction=(
+                        f"# 1. Send the XSS payload and check if it appears unencoded:\n"
+                        f"{curl}\n"
+                        f"# 2. Search for the payload in the response body:\n"
+                        f"$ # Grep for: {payload}\n"
+                        f"# 3. If the payload is NOT HTML-encoded (< > not replaced by &lt; &gt;),\n"
+                        f"#    the XSS is confirmed.\n"
+                        f"# 4. To verify in a browser: paste the payload in the '{param_name}'\n"
+                        f"#    field and submit. An alert box confirms execution.\n"
+                        f"# 5. For a clean PoC screenshot, use: {payload}"
                     ),
                 )
         return None

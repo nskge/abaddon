@@ -103,3 +103,25 @@ def inject_into_params(
 ) -> Dict[str, str]:
     """Return a copy of *params* with *target* replaced by *payload*."""
     return {**params, target: payload}
+
+
+def build_curl_command(
+    url: str,
+    method: str,
+    params: Dict[str, str],
+    param_name: str,
+    payload: str,
+) -> str:
+    """Build a ready-to-paste curl command that reproduces a finding.
+
+    Returns a single-line shell command string prefixed with ``$ ``.
+    """
+    injected = inject_into_params(params, param_name, payload)
+
+    if method == "GET":
+        full_url = rebuild_url_with_params(url, injected)
+        return f'$ curl -s -k "{full_url}"'
+    else:
+        data_parts = [f"{k}={v}" for k, v in injected.items()]
+        data_str = "&".join(data_parts)
+        return f'$ curl -s -k -X POST -d "{data_str}" "{url}"'

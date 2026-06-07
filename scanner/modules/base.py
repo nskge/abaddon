@@ -20,17 +20,19 @@ class Finding:
         evidence: str,
         confidence: str = "medium",
         details: Optional[str] = None,
+        reproduction: Optional[str] = None,
     ) -> None:
         """
         Args:
-            vuln_type:  Human-readable vulnerability label (e.g. "SQL Injection (Error-based)").
-            url:        Target URL (without injected payload).
-            method:     HTTP method used ("GET" or "POST").
-            parameter:  Name of the vulnerable parameter.
-            payload:    Payload string that triggered the finding.
-            evidence:   Short excerpt proving the vulnerability (error snippet, timing, etc.).
-            confidence: Reliability level — "high", "medium", or "low".
-            details:    Optional longer explanation / remediation hint.
+            vuln_type:    Human-readable vulnerability label (e.g. "SQL Injection (Error-based)").
+            url:          Target URL (without injected payload).
+            method:       HTTP method used ("GET" or "POST").
+            parameter:    Name of the vulnerable parameter.
+            payload:      Payload string that triggered the finding.
+            evidence:     Short excerpt proving the vulnerability (error snippet, timing, etc.).
+            confidence:   Reliability level — "high", "medium", or "low".
+            details:      Optional longer explanation / remediation hint.
+            reproduction: Step-by-step manual verification instructions (curl commands, PoC).
         """
         self.vuln_type = vuln_type
         self.url = url
@@ -40,10 +42,11 @@ class Finding:
         self.evidence = evidence
         self.confidence = confidence
         self.details = details
+        self.reproduction = reproduction
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialise to a plain dict (suitable for JSON export)."""
-        return {
+        d = {
             "type": self.vuln_type,
             "url": self.url,
             "method": self.method,
@@ -53,6 +56,9 @@ class Finding:
             "confidence": self.confidence,
             "details": self.details,
         }
+        if self.reproduction:
+            d["reproduction"] = self.reproduction
+        return d
 
     def __repr__(self) -> str:
         return (

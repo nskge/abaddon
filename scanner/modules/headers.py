@@ -153,6 +153,12 @@ class HeaderScanner(BaseModule):
                     evidence=f"Header '{header_name}' is absent from the response",
                     confidence="low",
                     details=f"{risk}. {remediation}.",
+                    reproduction=(
+                        f"# 1. Inspect the response headers:\n"
+                        f"$ curl -s -k -I \"{url}\" | grep -i \"{header_name}\"\n"
+                        f"# 2. If no output, the header is missing.\n"
+                        f"# 3. Fix: {remediation}."
+                    ),
                 ))
 
         return findings
@@ -185,6 +191,13 @@ class HeaderScanner(BaseModule):
                             f"Server header '{header_name}' reveals {tech} ({match.group()}). "
                             f"Remediation: suppress version info in {header_name} header."
                         ),
+                        reproduction=(
+                            f"# 1. Check the {header_name} header:\n"
+                            f"$ curl -s -k -I \"{url}\" | grep -i \"{header_name}\"\n"
+                            f"# 2. If output shows version info (e.g. '{match.group()}'),\n"
+                            f"#    the server is leaking technology details.\n"
+                            f"# 3. Use this info for targeted exploits (search CVEs for {tech})."
+                        ),
                     ))
                     break
             else:
@@ -199,6 +212,12 @@ class HeaderScanner(BaseModule):
                         evidence=f"{header_name}: {value}",
                         confidence="low",
                         details=f"Remove or suppress the {header_name} header.",
+                        reproduction=(
+                            f"# 1. Check the {header_name} header:\n"
+                            f"$ curl -s -k -I \"{url}\" | grep -i \"{header_name}\"\n"
+                            f"# 2. Output '{header_name}: {value}' reveals the technology stack.\n"
+                            f"# 3. Search for known CVEs targeting this technology."
+                        ),
                     ))
 
         return findings
@@ -232,6 +251,18 @@ class HeaderScanner(BaseModule):
                     f"Wildcard or null CORS origin allows any site to read responses"
                     + (". Combined with credentials=true, this enables full account takeover via CORS." if acac == "true" else ".")
                     + " Remediation: restrict to specific trusted origins."
+                ),
+                reproduction=(
+                    f"# 1. Send a cross-origin request with an Origin header:\n"
+                    f"$ curl -s -k -I -H \"Origin: https://attacker.com\" \"{url}\"\n"
+                    f"# 2. Check the CORS headers in the response:\n"
+                    f"$ # Look for: Access-Control-Allow-Origin: {acao}\n"
+                    + (f"$ # And: Access-Control-Allow-Credentials: true\n"
+                       f"# 3. CRITICAL: credentials=true + wildcard/null origin = full account takeover.\n"
+                       f"#    Any malicious site can make authenticated requests on behalf of the user."
+                       if acac == "true" else
+                       f"# 3. If the response reflects your Origin header or uses '*',\n"
+                       f"#    any website can read the response cross-origin.")
                 ),
             ))
 
