@@ -8,8 +8,8 @@
     \____/|_|\_\_| |____/ \___\__,_|_| |_|_| |_|
 ```
 
-**Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.
-Fast, accurate, and report-ready.
+**Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.  
+Fast, accurate, and report-ready. — **v2.10.0**
 
 > **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
 
@@ -61,9 +61,15 @@ Fast, accurate, and report-ready.
 git clone https://github.com/nskge/OkrScann.git
 cd OkrScann/vuln_scanner
 pip install -r requirements.txt
+# JS-aware crawl (optional)
+pip install playwright && python -m playwright install chromium
 ```
 
 **Requires:** Python 3.10+
+
+```bash
+python main.py --version   # OkrScann v2.10.0
+```
 
 ---
 
