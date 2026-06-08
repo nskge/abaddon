@@ -251,9 +251,7 @@ class HeaderScanner(BaseModule):
         acao = resp.headers.get("Access-Control-Allow-Origin", "")
         acac = resp.headers.get("Access-Control-Allow-Credentials", "").lower()
 
-        if not acao:
-            return findings
-
+        # --- Passive check: wildcard / null ACAO on the baseline response ---
         if acao in _DANGEROUS_CORS_ORIGINS:
             confidence = "high" if acac == "true" else "medium"
             findings.append(Finding(
@@ -285,5 +283,44 @@ class HeaderScanner(BaseModule):
                        f"#    any website can read the response cross-origin.")
                 ),
             ))
+
+        # --- Active check: probe for origin reflection ---
+        # Many servers reflect the caller's Origin header back, even when ACAO
+        # was not present on the baseline response. Test with a canary origin.
+        _CANARY_ORIGIN = "https://attacker-cors-probe.com"
+        probe_resp = self.http.get(url, headers={"Origin": _CANARY_ORIGIN})
+        if probe_resp is not None:
+            probe_acao = probe_resp.headers.get("Access-Control-Allow-Origin", "")
+            probe_acac = probe_resp.headers.get("Access-Control-Allow-Credentials", "").lower()
+            if probe_acao == _CANARY_ORIGIN:
+                # Server reflected our injected Origin back — CORS misconfiguration
+                confidence = "high" if probe_acac == "true" else "medium"
+                findings.append(Finding(
+                    vuln_type="CORS Misconfiguration (Reflected Origin)",
+                    url=url,
+                    method="GET",
+                    parameter="Origin",
+                    payload=_CANARY_ORIGIN,
+                    evidence=(
+                        f"Server reflected injected Origin: Access-Control-Allow-Origin: {probe_acao}"
+                        + (f" + Allow-Credentials: true" if probe_acac == "true" else "")
+                    ),
+                    confidence=confidence,
+                    details=(
+                        "The server reflects any Origin header back in Access-Control-Allow-Origin, "
+                        "allowing any website to make cross-origin requests and read the response"
+                        + (". Combined with Allow-Credentials: true, this enables full account takeover." if probe_acac == "true" else ".")
+                        + " Remediation: validate Origin against an explicit allow-list; never reflect arbitrary origins."
+                    ),
+                    reproduction=(
+                        f"# 1. Send request with arbitrary Origin and check reflection:\n"
+                        f"$ curl -s -I -H \"Origin: {_CANARY_ORIGIN}\" \"{url}\"\n"
+                        f"# 2. Look for: Access-Control-Allow-Origin: {_CANARY_ORIGIN}\n"
+                        + (f"# 3. CRITICAL: also check for Access-Control-Allow-Credentials: true\n"
+                           f"#    This combination allows reading authenticated responses from any origin."
+                           if probe_acac == "true" else
+                           f"# 3. Any attacker domain can now read responses from this endpoint.")
+                    ),
+                ))
 
         return findings

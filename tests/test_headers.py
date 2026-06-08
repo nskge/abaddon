@@ -204,6 +204,73 @@ class TestCORS(unittest.TestCase):
         cors = [f for f in findings if "CORS" in f.vuln_type]
         self.assertEqual(len(cors), 0)
 
+    def test_reflected_origin_detected(self):
+        """Server that echoes Origin header back triggers CORS reflected-origin finding."""
+        _CANARY = "https://attacker-cors-probe.com"
+        scanner = self._scanner()
+
+        _GOOD_HEADERS = {
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'self'",
+            "X-XSS-Protection": "1",
+            "Referrer-Policy": "strict-origin",
+            "Permissions-Policy": "camera=()",
+        }
+
+        call_count = [0]
+        def _get(url, **kwargs):
+            call_count[0] += 1
+            # First call = baseline (no ACAO)
+            if call_count[0] == 1:
+                return _make_response(headers=_GOOD_HEADERS)
+            # Second call = active probe with Origin header — server reflects it
+            origin = kwargs.get("headers", {}).get("Origin", "")
+            return _make_response(headers={
+                **_GOOD_HEADERS,
+                "Access-Control-Allow-Origin": origin or "",
+            })
+
+        scanner.http.get.side_effect = _get
+
+        findings = scanner.scan_parameter("http://t.local/", "GET", {"x": "1"}, "x")
+        cors = [f for f in findings if "CORS" in f.vuln_type]
+        self.assertGreater(len(cors), 0)
+        self.assertIn("Reflected", cors[0].vuln_type)
+
+    def test_reflected_origin_with_credentials_high_confidence(self):
+        """Reflected origin + credentials=true is HIGH confidence."""
+        _CANARY = "https://attacker-cors-probe.com"
+        scanner = self._scanner()
+
+        _GOOD_HEADERS = {
+            "X-Frame-Options": "DENY",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'self'",
+            "X-XSS-Protection": "1",
+            "Referrer-Policy": "strict-origin",
+            "Permissions-Policy": "camera=()",
+        }
+
+        call_count = [0]
+        def _get(url, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return _make_response(headers=_GOOD_HEADERS)
+            origin = kwargs.get("headers", {}).get("Origin", "")
+            return _make_response(headers={
+                **_GOOD_HEADERS,
+                "Access-Control-Allow-Origin": origin or "",
+                "Access-Control-Allow-Credentials": "true",
+            })
+
+        scanner.http.get.side_effect = _get
+
+        findings = scanner.scan_parameter("http://t.local/", "GET", {"x": "1"}, "x")
+        cors = [f for f in findings if "CORS" in f.vuln_type]
+        self.assertGreater(len(cors), 0)
+        self.assertEqual(cors[0].confidence, "high")
+
     def test_none_response_handled(self):
         """None response does not raise."""
         scanner = self._scanner()
