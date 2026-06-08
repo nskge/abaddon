@@ -26,7 +26,7 @@ Fast, accurate, and report-ready.
 | **SSTI** | Template injection (Jinja2, Twig, Freemarker, Mako, ERB, Smarty, Velocity) |
 | **CRLF** | Header injection, Set-Cookie injection, response splitting |
 | **Redirect** | Open redirect via Location, meta-refresh, JavaScript |
-| **Headers** | Missing security headers, server disclosure, CORS misconfiguration |
+| **Headers** | Missing security headers, server disclosure, CORS misconfiguration (passive wildcard + active reflected-origin probe) |
 | **JWT** | alg:none bypass, weak HS256 secret brute-force, sensitive payload fields |
 | **SSRF** | Cloud metadata (AWS/GCP/Azure), localhost, internal services (Redis/ES/k8s) — parallel probes |
 | **XXE** | Raw XML POST, XML param injection, XML-hinted params — 6 payload variants |
@@ -51,7 +51,7 @@ Fast, accurate, and report-ready.
 - **Ctrl+C recovery** — graceful interrupt returns all findings collected so far
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
-- **254 unit tests**
+- **256 unit tests**
 
 ---
 
@@ -169,7 +169,7 @@ Output:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 254 tests
+python -m pytest tests/ -v     # 256 tests
 ```
 
 ---
