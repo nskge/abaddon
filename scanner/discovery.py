@@ -1,6 +1,7 @@
-"""Subdomain enumeration and URL/path discovery via DNS + HTTP probing."""
+"""Subdomain enumeration, URL/path discovery, and subdomain takeover detection."""
 
 import concurrent.futures
+import re
 import socket
 from typing import Dict, List, Optional, Tuple
 
@@ -93,10 +94,105 @@ _URL_WORDLIST: List[str] = [
 # Status codes that indicate something interesting
 _INTERESTING = frozenset((200, 201, 204, 301, 302, 401, 403))
 
+# ---------------------------------------------------------------------------
+# Subdomain takeover fingerprints
+# (service name, CNAME pattern, HTTP body fingerprint, confidence)
+# ---------------------------------------------------------------------------
+_TAKEOVER_FINGERPRINTS: List[Dict] = [
+    {
+        "service": "GitHub Pages",
+        "cname_pattern": r"\.github\.io$",
+        "body_pattern": r"There isn't a GitHub Pages site here|404 There is no GitHub Pages site",
+        "confidence": "high",
+    },
+    {
+        "service": "AWS S3",
+        "cname_pattern": r"\.s3\.amazonaws\.com$|\.s3-website[.-]",
+        "body_pattern": r"NoSuchBucket|The specified bucket does not exist",
+        "confidence": "high",
+    },
+    {
+        "service": "AWS CloudFront",
+        "cname_pattern": r"\.cloudfront\.net$",
+        "body_pattern": r"Bad request|ERROR: The request could not be satisfied",
+        "confidence": "medium",
+    },
+    {
+        "service": "Heroku",
+        "cname_pattern": r"\.herokuapp\.com$|\.herokudns\.com$",
+        "body_pattern": r"No such app|herokucdn\.com/error-pages/no-such-app",
+        "confidence": "high",
+    },
+    {
+        "service": "Netlify",
+        "cname_pattern": r"\.netlify\.app$|\.netlify\.com$",
+        "body_pattern": r"Not Found - Request ID|netlify",
+        "confidence": "medium",
+    },
+    {
+        "service": "Shopify",
+        "cname_pattern": r"\.myshopify\.com$",
+        "body_pattern": r"Sorry, this shop is currently unavailable|only accessible to authorized users",
+        "confidence": "high",
+    },
+    {
+        "service": "Azure / Blob Storage",
+        "cname_pattern": r"\.azurewebsites\.net$|\.blob\.core\.windows\.net$|\.cloudapp\.net$",
+        "body_pattern": r"404 Web Site not Found|BlobNotFound|The specified container does not exist",
+        "confidence": "high",
+    },
+    {
+        "service": "Fastly",
+        "cname_pattern": r"\.fastly\.net$",
+        "body_pattern": r"Fastly error: unknown domain",
+        "confidence": "high",
+    },
+    {
+        "service": "Ghost",
+        "cname_pattern": r"\.ghost\.io$",
+        "body_pattern": r"The thing you were looking for is no longer here",
+        "confidence": "high",
+    },
+    {
+        "service": "Zendesk",
+        "cname_pattern": r"\.zendesk\.com$",
+        "body_pattern": r"Help Center Closed|this help center no longer exists",
+        "confidence": "high",
+    },
+    {
+        "service": "Cargo",
+        "cname_pattern": r"\.cargo\.site$",
+        "body_pattern": r"404 Not Found",
+        "confidence": "low",
+    },
+    {
+        "service": "Webflow",
+        "cname_pattern": r"\.webflow\.io$",
+        "body_pattern": r"The page you are looking for doesn't exist",
+        "confidence": "medium",
+    },
+]
+
 
 # ---------------------------------------------------------------------------
 # Subdomain enumeration
 # ---------------------------------------------------------------------------
+
+def _get_cname(fqdn: str) -> Optional[str]:
+    """Return the CNAME target for *fqdn*, or None if it's an A/AAAA record."""
+    try:
+        # getaddrinfo doesn't follow CNAME separately, so use gethostbyname_ex
+        # which returns (hostname, aliases, addresses) — aliases contains CNAMEs
+        canonical, aliases, _ = socket.gethostbyname_ex(fqdn)
+        # If canonical differs from fqdn it resolved through a CNAME chain
+        if canonical and canonical.rstrip(".") != fqdn.rstrip("."):
+            return canonical.rstrip(".")
+        if aliases:
+            return aliases[0].rstrip(".")
+    except (socket.gaierror, OSError):
+        pass
+    return None
+
 
 def enumerate_subdomains(
     domain: str,
@@ -129,6 +225,64 @@ def enumerate_subdomains(
 
     results.sort(key=lambda r: r[0])
     return results
+
+
+def check_subdomain_takeover(
+    fqdn: str,
+    http_client=None,
+) -> Optional[Dict]:
+    """Check if *fqdn* is vulnerable to subdomain takeover.
+
+    Strategy:
+      1. Resolve the CNAME chain — if the target is a known cloud service CNAME,
+         check the HTTP response body for service-specific "unclaimed" fingerprints.
+      2. If the CNAME matches a known-takeable service AND the body contains the
+         unclaimed-site error message → subdomain takeover confirmed.
+
+    Returns:
+        A dict with keys (fqdn, cname, service, confidence, evidence) or None.
+    """
+    cname = _get_cname(fqdn)
+    if not cname:
+        return None
+
+    # Match CNAME against known takeable services
+    matched_fp = None
+    for fp in _TAKEOVER_FINGERPRINTS:
+        if re.search(fp["cname_pattern"], cname, re.IGNORECASE):
+            matched_fp = fp
+            break
+
+    if not matched_fp:
+        return None
+
+    # Fetch the subdomain's HTTP response and check for unclaimed fingerprint
+    if http_client is None:
+        return None
+
+    try:
+        resp = http_client.get(f"http://{fqdn}")
+        if resp is None:
+            resp = http_client.get(f"https://{fqdn}")
+    except Exception:
+        return None
+
+    if resp is None:
+        return None
+
+    if re.search(matched_fp["body_pattern"], resp.text, re.IGNORECASE):
+        return {
+            "fqdn": fqdn,
+            "cname": cname,
+            "service": matched_fp["service"],
+            "confidence": matched_fp["confidence"],
+            "evidence": (
+                f"CNAME → {cname} ({matched_fp['service']}) "
+                f"returns unclaimed-service response"
+            ),
+        }
+
+    return None
 
 
 # ---------------------------------------------------------------------------

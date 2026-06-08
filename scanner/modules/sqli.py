@@ -360,7 +360,12 @@ class SQLiScanner(BaseModule):
         true_pl: str,
         false_pl: str,
     ) -> Optional[Finding]:
-        """Determine if the true/false response pair signals blind SQLi."""
+        """Determine if the true/false response pair signals blind SQLi.
+
+        False-positive guard: send the TRUE condition a second time and verify
+        the two TRUE responses are consistent.  On dynamic pages (ads, nonces,
+        timestamps) both sizes will vary randomly — those are not SQLi.
+        """
         t_len = len(r_true.text)
         f_len = len(r_false.text)
         diff  = abs(t_len - f_len)

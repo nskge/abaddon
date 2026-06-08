@@ -79,7 +79,8 @@ Examples
         "--scan-type",
         choices=[
             "sqli", "xss", "lfi", "redirect", "cmdi", "crlf",
-            "ssti", "headers", "jwt", "ssrf", "xxe", "bypass403", "all",
+            "ssti", "headers", "jwt", "ssrf", "xxe", "bypass403",
+            "graphql", "all",
         ],
         default="all",
         help="Vulnerability type to scan for  (default: all)",

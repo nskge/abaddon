@@ -16,6 +16,7 @@ from .modules.cmdi import CommandInjectionScanner
 from .modules.crlf import CRLFScanner
 from .modules.headers import HeaderScanner
 from .modules.bypass403 import Bypass403Scanner
+from .modules.graphql import GraphQLScanner
 from .modules.jwt_analyzer import JWTAnalyzer
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
@@ -57,6 +58,7 @@ _MODULE_MAP = {
     "ssrf":      SSRFScanner,
     "xxe":       XXEScanner,
     "bypass403": Bypass403Scanner,
+    "graphql":   GraphQLScanner,
 }
 
 # ANSI helpers for recon display
@@ -510,7 +512,7 @@ class Scanner:
     # ------------------------------------------------------------------
 
     def _run_subdomain_enum(self, domain: str) -> None:
-        from .discovery import enumerate_subdomains
+        from .discovery import enumerate_subdomains, check_subdomain_takeover
         print(self._c("   +--- Subdomain Enumeration ---", _DIM))
         print(self._c(f"   | Enumerating *.{domain} ...", _DIM))
         results = enumerate_subdomains(domain)
@@ -518,10 +520,43 @@ class Scanner:
             print(self._c("   | No live subdomains found.", _DIM))
         else:
             for fqdn, ip in results:
+                # Check for subdomain takeover opportunity
+                takeover = check_subdomain_takeover(fqdn, http_client=self.http)
+                if takeover:
+                    tag = self._c(f"  [TAKEOVER? {takeover['service']}]", _RED + _BOLD)
+                    self.findings.append(Finding(
+                        vuln_type="Subdomain Takeover (Potential)",
+                        url=f"http://{fqdn}",
+                        method="GET",
+                        parameter="(DNS / CNAME)",
+                        payload="N/A",
+                        evidence=takeover["evidence"],
+                        confidence=takeover["confidence"],
+                        details=(
+                            f"Subdomain {fqdn!r} CNAME points to "
+                            f"{takeover['cname']!r} ({takeover['service']}) "
+                            f"but the service returns an unclaimed-site response. "
+                            f"An attacker may be able to register the target resource "
+                            f"and serve arbitrary content under {fqdn!r}. "
+                            f"Remediation: remove the dangling CNAME record or "
+                            f"reclaim the resource on {takeover['service']}."
+                        ),
+                        reproduction=(
+                            f"# 1. Verify the dangling CNAME:\n"
+                            f"$ dig CNAME {fqdn}\n"
+                            f"# Expected: {fqdn} CNAME {takeover['cname']}\n"
+                            f"# 2. Confirm the service is unclaimed:\n"
+                            f"$ curl -sk 'http://{fqdn}' | head -20\n"
+                            f"# 3. Register the resource on {takeover['service']} to claim it."
+                        ),
+                    ))
+                else:
+                    tag = ""
                 print(
                     self._c("   | ", _DIM)
                     + self._c(f"{fqdn:<45}", _CYAN + _BOLD)
                     + self._c(f"  {ip}", _YELLOW)
+                    + tag
                 )
         print(self._c("   +-----------------------------", _DIM))
         print()
