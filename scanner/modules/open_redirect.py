@@ -22,6 +22,15 @@ logger = logging.getLogger("vulnscanner")
 # Canary domains -- must not match any real application domain
 _CANARY_DOMAIN = "evil.com"
 
+# Parameter name hints that suggest this field could hold a redirect destination
+_REDIRECT_PARAM_HINTS = {
+    "url", "redirect", "next", "return", "goto", "dest", "destination",
+    "redir", "redirect_uri", "redirect_url", "return_url", "back",
+    "forward", "continue", "callback", "target", "to", "location",
+    "ref", "referer", "referrer", "href", "link", "from", "source",
+    "uri", "path", "page", "jump", "returnto", "successurl", "failurl",
+}
+
 _REDIRECT_PAYLOADS = [
     f"https://{_CANARY_DOMAIN}",
     f"http://{_CANARY_DOMAIN}",
@@ -59,7 +68,22 @@ class OpenRedirectScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> List[Finding]:
-        """Test *param_name* for open redirect."""
+        """Test *param_name* for open redirect.
+
+        Skip parameters whose name is clearly unrelated to redirects (e.g. 'id',
+        'category', 'q') unless their current value already looks like a URL.
+        This significantly reduces noise on full scans.
+        """
+        value = params.get(param_name, "")
+        name_lower = param_name.lower().replace("-", "_").replace(".", "_")
+
+        looks_like_url = re.match(r"https?://", value) or value.startswith("/")
+        is_redirect_param = any(hint in name_lower for hint in _REDIRECT_PARAM_HINTS)
+
+        if not is_redirect_param and not looks_like_url:
+            self.http.follow_redirects = self._orig_follow
+            return []
+
         payloads = self.load_payloads(_REDIRECT_PAYLOADS, self.custom_payloads)
 
         for payload in payloads:
