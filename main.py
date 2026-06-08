@@ -90,6 +90,15 @@ Examples
         help="Auto-detect HTML forms on the page and test their fields",
     )
     scan.add_argument(
+        "--js-crawl", action="store_true",
+        help=(
+            "Use a real Chromium browser (Playwright) to render JS, click buttons "
+            "that reveal hidden modals/forms, and intercept XHR/Fetch requests. "
+            "Finds inputs that --crawl misses in SPAs (React, Vue, Firebase etc.). "
+            "Requires: pip install playwright && python -m playwright install chromium"
+        ),
+    )
+    scan.add_argument(
         "--payloads",
         metavar="FILE",
         help="Custom payload file (one payload per line; # = comment)",
@@ -245,6 +254,7 @@ def main() -> int:
         "param": args.param,
         "scan_type": args.scan_type,
         "crawl": args.crawl,
+        "js_crawl": getattr(args, "js_crawl", False),
         "custom_payloads": args.payloads,
         "delay_threshold": args.delay,
         "headers": headers,

@@ -201,6 +201,11 @@ class Scanner:
                             targets.append(ft)
                             existing_keys.add(key)
 
+            # JS-aware crawl (Playwright) — reveals SPA / modal forms
+            if self.config.get("js_crawl"):
+                js_targets = self._js_crawl(url, target_param, targets)
+                targets.extend(js_targets)
+
             if not targets:
                 logger.warning(
                     "No injectable parameters found. "
@@ -650,6 +655,40 @@ class Scanner:
                 )
 
         return targets
+
+    def _js_crawl(self, url: str, target_param, existing_targets: List[Dict]) -> List[Dict]:
+        """Run the Playwright JS crawler and return new injectable targets."""
+        from .js_crawler import js_crawl
+        existing_keys = {(t["url"], t["method"], t["param_name"]) for t in existing_targets}
+
+        # Pass cookies as raw string for Playwright context
+        cookies_dict = self.config.get("cookies", {})
+        cookies_raw = "; ".join(f"{k}={v}" for k, v in cookies_dict.items())
+
+        js_cfg = {
+            "headers": self.config.get("headers", {}),
+            "cookies_raw": cookies_raw,
+            "proxy": self.config.get("proxy"),
+        }
+
+        all_js = js_crawl(url, js_cfg, timeout=self.config.get("timeout", 20))
+
+        new_targets = []
+        for t in all_js:
+            if target_param and t["param_name"] != target_param:
+                continue
+            key = (t["url"], t["method"], t["param_name"])
+            if key not in existing_keys:
+                existing_keys.add(key)
+                new_targets.append(t)
+
+        if new_targets:
+            param_names = sorted({t["param_name"] for t in new_targets})
+            logger.info(
+                "JS-crawl: found %d new injectable field(s): %s",
+                len(new_targets), param_names,
+            )
+        return new_targets
 
     def _crawl_forms(self, url, baseline_resp, target_param) -> List[Dict]:
         """Parse HTML forms from *baseline_resp* and return injectable targets."""
