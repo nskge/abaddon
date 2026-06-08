@@ -31,6 +31,7 @@ Fast, accurate, and report-ready.
 | **SSRF** | Cloud metadata (AWS/GCP/Azure), localhost, internal services (Redis/ES/k8s) — parallel probes |
 | **XXE** | Raw XML POST, XML param injection, XML-hinted params — 6 payload variants |
 | **403 Bypass** | Header spoofing (X-Original-URL, X-Forwarded-For, …), path manipulation (16 variants), verb tampering |
+| **GraphQL** | Introspection exposure, GraphiQL/Playground IDE, batch queries, field suggestions — 12 common endpoint paths probed |
 | **CVE Detection** | 34 CVEs across 14 services (Apache, Nginx, PHP, IIS, Tomcat, OpenSSL, jQuery, WordPress, Drupal, Struts, Spring, WebLogic, Confluence, Joomla) with CVSS, Metasploit modules, NVD links |
 
 ---
@@ -38,6 +39,9 @@ Fast, accurate, and report-ready.
 ## Features
 
 - **Recon phase** — DNS, IP, latency, server/tech fingerprint, CVE check before every scan
+- **Static target detection** — detects CDN/SPA targets (cache headers + response hash) and skips injection modules automatically to eliminate false positives
+- **JS-aware crawl** — headless Chromium via Playwright; clicks modals/buttons (Register, Login, Cadastrar…), intercepts XHR/Fetch, finds inputs with no `name` attribute (`--js-crawl`)
+- **Subdomain takeover** — CNAME chain resolution → unclaimed-service fingerprint check (12 services)
 - **Port scanner** — concurrent TCP probe of 31 common ports with banner grab (`--port-scan`)
 - **Path discovery** — 130 common paths probed concurrently (`--discover-paths`)
 - **Subdomain enumeration** — 80 common prefixes resolved via DNS (`--discover-subs`)
@@ -47,7 +51,7 @@ Fast, accurate, and report-ready.
 - **Ctrl+C recovery** — graceful interrupt returns all findings collected so far
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
-- **230+ unit tests**
+- **254 unit tests**
 
 ---
 
@@ -97,6 +101,12 @@ python main.py -u "http://api.target.com/?url=x" \
 # 403 bypass on a protected endpoint
 python main.py -u "http://target/admin?x=1" --scan-type bypass403
 
+# JS-aware crawl — finds inputs hidden behind modals/SPA routes
+python main.py -u "http://target/" --js-crawl
+
+# GraphQL endpoint probing
+python main.py -u "http://target/" --scan-type graphql
+
 # Route through Burp Suite
 python main.py -u "http://target/?q=test" --proxy http://127.0.0.1:8080
 
@@ -115,8 +125,9 @@ Target:
 
 Scan options:
   --scan-type TYPE      sqli|xss|lfi|redirect|cmdi|crlf|ssti|headers|
-                        jwt|ssrf|xxe|bypass403|all  (default: all)
+                        jwt|ssrf|xxe|bypass403|graphql|all  (default: all)
   --crawl               Auto-detect HTML forms
+  --js-crawl            JS-aware crawl via headless Chromium (finds SPA inputs)
   --payloads FILE       Custom payload file (one per line)
   --delay SECS          Time-based detection threshold (default: 5.0)
   --threads N           Concurrent module threads (default: 4)
@@ -158,7 +169,7 @@ Output:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 230+ tests
+python -m pytest tests/ -v     # 254 tests
 ```
 
 ---
@@ -192,7 +203,9 @@ scanner/
     ├── jwt_analyzer.py
     ├── ssrf.py
     ├── xxe.py
-    └── bypass403.py
+    ├── bypass403.py
+    └── graphql.py
+js_crawler.py            Playwright-based JS crawl for SPA/modal input discovery
 ```
 
 ### Adding a module
