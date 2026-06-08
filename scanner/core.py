@@ -754,9 +754,22 @@ class Scanner:
         return targets
 
     def _js_crawl(self, url: str, target_param, existing_targets: List[Dict]) -> List[Dict]:
-        """Run the Playwright JS crawler and return new injectable targets."""
+        """Run the Playwright JS crawler and return new injectable targets.
+
+        Only targets whose hostname matches the original target (or is a
+        subdomain of it) are returned.  External domains intercepted by the
+        crawler (e.g. CDN calls, Firebase/Google APIs) are silently skipped to
+        prevent false positives and out-of-scope testing.
+        """
         from .js_crawler import js_crawl
         existing_keys = {(t["url"], t["method"], t["param_name"]) for t in existing_targets}
+
+        target_host = urlparse(url).hostname or ""
+
+        def _in_scope(target_url: str) -> bool:
+            """Return True if *target_url* is on the same host or a subdomain."""
+            h = urlparse(target_url).hostname or ""
+            return h == target_host or h.endswith("." + target_host)
 
         # Pass cookies as raw string for Playwright context
         cookies_dict = self.config.get("cookies", {})
@@ -771,7 +784,15 @@ class Scanner:
         all_js = js_crawl(url, js_cfg, timeout=self.config.get("timeout", 20))
 
         new_targets = []
+        skipped_external = 0
         for t in all_js:
+            if not _in_scope(t["url"]):
+                skipped_external += 1
+                logger.debug(
+                    "JS-crawl: skipping out-of-scope URL %s (target host: %s)",
+                    t["url"], target_host,
+                )
+                continue
             if target_param and t["param_name"] != target_param:
                 continue
             key = (t["url"], t["method"], t["param_name"])
@@ -779,6 +800,11 @@ class Scanner:
                 existing_keys.add(key)
                 new_targets.append(t)
 
+        if skipped_external:
+            logger.info(
+                "JS-crawl: skipped %d out-of-scope URL(s) (external domains).",
+                skipped_external,
+            )
         if new_targets:
             param_names = sorted({t["param_name"] for t in new_targets})
             logger.info(
@@ -788,7 +814,11 @@ class Scanner:
         return new_targets
 
     def _crawl_forms(self, url, baseline_resp, target_param) -> List[Dict]:
-        """Parse HTML forms from *baseline_resp* and return injectable targets."""
+        """Parse HTML forms from *baseline_resp* and return injectable targets.
+
+        Forms whose action points to a different domain than the original target
+        are skipped (scope enforcement — same rule as JS-crawl).
+        """
         try:
             forms = extract_forms(baseline_resp.text, url)
         except Exception as exc:
@@ -803,10 +833,22 @@ class Scanner:
             len(forms),
         )
 
+        target_host = urlparse(url).hostname or ""
+
         targets = []
         for form in forms:
             action = form["action"]
             method = form["method"]
+
+            # Skip forms that submit to a different domain
+            action_host = urlparse(action).hostname or ""
+            if action_host and action_host != target_host and not action_host.endswith("." + target_host):
+                logger.debug(
+                    "Auto-crawl: skipping out-of-scope form action %s (target host: %s)",
+                    action, target_host,
+                )
+                continue
+
             params = {
                 inp["name"]: inp["value"]
                 for inp in form["inputs"]
