@@ -148,7 +148,7 @@ class SSRFScanner(BaseModule):
                 return None
 
             # Skip if response identical to baseline — server ignored the URL param
-            if resp.text == baseline_resp.text if baseline_resp else False:
+            if baseline_resp is not None and resp.text == baseline_resp.text:
                 return None
 
             body = resp.text[:8192]
