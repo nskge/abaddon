@@ -189,6 +189,15 @@ class Scanner:
 
             baseline_resp = self._preflight_check(url, method, data_string)
 
+            # Notify user if static/CDN target detected (always visible, not just --verbose)
+            if getattr(self, "_static_target", False) and not self.config.get("quiet", False):
+                print(self._c(
+                    "   [~] Static/CDN target detected — injection modules skipped. "
+                    "Headers + GraphQL probes still active. Use --js-crawl for SPAs.",
+                    _YELLOW,
+                ))
+                print()
+
             targets = self._build_targets(url, method, data_string, target_param)
 
             if (not targets or crawl) and baseline_resp is not None:
