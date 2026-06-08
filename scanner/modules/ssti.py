@@ -1,12 +1,16 @@
 """Server-Side Template Injection (SSTI) detection module.
 
 Detection strategy:
-  1. Math probe -- inject unique arithmetic expressions (e.g. {{7*7}}) and check
-     whether the server evaluates them and returns the result (e.g. "49").
-  2. Multi-engine coverage -- payloads target Jinja2, Twig, Freemarker, Smarty,
-     Mako, Pebble, Velocity, ERB, and generic expression engines.
-  3. Append + replace modes -- numeric parameters get the expression appended;
-     string parameters get the expression as the full value.
+  1. Random math probe -- inject arithmetic with random large factors (e.g. {{7331*6271}})
+     and verify the EXACT product appears in the response but NOT in the baseline.
+  2. String concatenation probes -- detect engines that don't eval math.
+  3. Append + replace modes -- covers both quoted-string and bare-value contexts.
+
+False-positive prevention:
+  - The expected result (product) is compared against the baseline response.
+    If the product already exists in the baseline, the result is discarded.
+  - Random factors are chosen per-scan to avoid collisions with static page content.
+  - Raw template syntax must NOT appear in the response (that means literal echo, not eval).
 
 References:
   - PortSwigger SSTI research: https://portswigger.net/research/server-side-template-injection
@@ -24,49 +28,32 @@ from ..parser import build_curl_command, inject_into_params, rebuild_url_with_pa
 
 logger = logging.getLogger("vulnscanner")
 
-# ---------------------------------------------------------------------------
-# Math-based detection payloads
-# ---------------------------------------------------------------------------
-# Each tuple: (payload_template, expected_result, engine_hint)
-# The payloads use multiplication because:
-#   - The factors are unlikely to appear naturally in the page
-#   - The product is specific enough to confirm evaluation
-#   - No side effects (unlike RCE payloads)
 
-_MATH_PROBES: List[Tuple[str, str, str]] = [
-    # Jinja2 / Twig (Python / PHP)
-    ("{{7*7}}", "49", "Jinja2/Twig"),
-    ("{{7*'7'}}", "7777777", "Jinja2"),
-    ("{{4*4}}aa{{7*7}}", "16aa49", "Jinja2/Twig"),
-    # Freemarker (Java)
-    ("${7*7}", "49", "Freemarker/Generic"),
-    ("#{7*7}", "49", "Ruby ERB/Generic"),
-    # Smarty (PHP)
-    ("{7*7}", "49", "Smarty"),
-    # Mako (Python)
-    ("${7*7}", "49", "Mako/Freemarker"),
-    # Pebble (Java)
-    ("{{7*7}}", "49", "Pebble/Jinja2"),
-    # ERB (Ruby)
-    ("<%= 7*7 %>", "49", "ERB"),
-    # Velocity (Java)
-    ("#set($x=7*7)${x}", "49", "Velocity"),
-    # Tornado (Python)
-    ("{{7*7}}", "49", "Tornado"),
-    # Slim / Jade (Node)
-    ("#{7*7}", "49", "Slim/Jade"),
-]
+# ---------------------------------------------------------------------------
+# Random probe generation
+# ---------------------------------------------------------------------------
 
-# Unique probes that reduce false positives by using uncommon numbers
-_UNIQUE_PROBES: List[Tuple[str, str, str]] = [
-    ("{{43*47}}", "2021", "Jinja2/Twig"),
-    ("${43*47}", "2021", "Freemarker/Mako"),
-    ("<%= 43*47 %>", "2021", "ERB"),
-    ("{{17*19}}", "323", "Jinja2/Twig"),
-    ("${17*19}", "323", "Freemarker/Mako"),
-    ("{{29*31}}", "899", "Jinja2/Twig"),
-    ("${29*31}", "899", "Freemarker/Mako"),
-]
+def _make_random_probes() -> List[Tuple[str, str, str]]:
+    """Generate SSTI math probes with random large factors per scan.
+
+    Using random numbers makes the expected product highly unlikely to already
+    appear in the target page, virtually eliminating false positives from
+    coincidental numeric strings (UUIDs, phone numbers, static IDs).
+    """
+    # Two independent random factors — their product is the expected result
+    a = random.randint(1009, 9973)   # primes range → large, unlikely to appear naturally
+    b = random.randint(1009, 9973)
+    prod = str(a * b)
+
+    return [
+        (f"{{{{{a}*{b}}}}}", prod, "Jinja2/Twig"),
+        (f"${{{a}*{b}}}", prod, "Freemarker/Mako"),
+        (f"<%= {a}*{b} %>", prod, "ERB"),
+        (f"#set($x={a}*{b})${{x}}", prod, "Velocity"),
+        (f"{{{{{a}*{b}}}}}aa", prod, "Jinja2/Pebble (AA marker)"),
+        (f"#{{{a}*{b}}}", prod, "Slim/Jade"),
+    ]
+
 
 # String concatenation probes (detect engines that don't eval math)
 _CONCAT_PROBES: List[Tuple[str, str, str]] = [
@@ -77,7 +64,11 @@ _CONCAT_PROBES: List[Tuple[str, str, str]] = [
 
 
 class SSTIScanner(BaseModule):
-    """Detects Server-Side Template Injection via math evaluation probes."""
+    """Detects Server-Side Template Injection via math evaluation probes.
+
+    Always compares against the baseline response to avoid false positives
+    from static page content containing the expected numeric result.
+    """
 
     NAME = "ssti"
 
@@ -96,28 +87,31 @@ class SSTIScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> List[Finding]:
-        """Test *param_name* for SSTI."""
+        """Test *param_name* for SSTI.
+
+        Gets baseline first to compare against, eliminating false positives
+        from numeric strings (UUIDs, phone numbers, etc.) already on the page.
+        """
         findings: List[Finding] = []
 
-        # Phase 1: quick unique-number probes (low false positive rate)
+        # --- Get baseline BEFORE injecting anything ---
+        baseline_resp = self._send(url, method, params)
+        baseline_html = baseline_resp.text if baseline_resp is not None else ""
+
+        # Phase 1: random math probes (virtually zero false positives)
+        unique_probes = _make_random_probes()
         finding = self._test_probes(
-            url, method, params, param_name, _UNIQUE_PROBES, phase="unique-math",
+            url, method, params, param_name, unique_probes,
+            baseline_html=baseline_html, confidence="high",
         )
         if finding:
             findings.append(finding)
             return findings
 
-        # Phase 2: standard math probes (broader engine coverage)
+        # Phase 2: string concatenation probes
         finding = self._test_probes(
-            url, method, params, param_name, _MATH_PROBES, phase="math",
-        )
-        if finding:
-            findings.append(finding)
-            return findings
-
-        # Phase 3: string concatenation probes
-        finding = self._test_probes(
-            url, method, params, param_name, _CONCAT_PROBES, phase="concat",
+            url, method, params, param_name, _CONCAT_PROBES,
+            baseline_html=baseline_html, confidence="medium",
         )
         if finding:
             findings.append(finding)
@@ -140,20 +134,19 @@ class SSTIScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
         probes: List[Tuple[str, str, str]],
-        phase: str,
+        baseline_html: str,
+        confidence: str,
     ) -> Optional[Finding]:
         """Inject each probe and check whether the evaluated result appears."""
         original_value = params.get(param_name, "")
 
         for payload_tpl, expected, engine in probes:
-            # --- append mode (e.g. id=1{{7*7}}) ---
+            # --- append mode (e.g. id=1{{7331*6271}}) ---
             appended = original_value + payload_tpl
-            resp = self._send(
-                url, method, inject_into_params(params, param_name, appended),
-            )
+            resp = self._send(url, method, inject_into_params(params, param_name, appended))
             if resp is not None:
                 confirmed, evidence = self._check_evaluation(
-                    resp.text, expected, payload_tpl, original_value,
+                    resp.text, expected, payload_tpl, original_value, baseline_html,
                 )
                 if confirmed:
                     logger.debug(
@@ -162,16 +155,14 @@ class SSTIScanner(BaseModule):
                     )
                     return self._make_finding(
                         url, method, param_name, appended,
-                        expected, engine, evidence, phase,
+                        expected, engine, evidence, confidence,
                     )
 
-            # --- replace mode (e.g. id={{7*7}}) ---
-            resp = self._send(
-                url, method, inject_into_params(params, param_name, payload_tpl),
-            )
+            # --- replace mode (e.g. id={{7331*6271}}) ---
+            resp = self._send(url, method, inject_into_params(params, param_name, payload_tpl))
             if resp is not None:
                 confirmed, evidence = self._check_evaluation(
-                    resp.text, expected, payload_tpl, original_value,
+                    resp.text, expected, payload_tpl, original_value, baseline_html,
                 )
                 if confirmed:
                     logger.debug(
@@ -180,7 +171,7 @@ class SSTIScanner(BaseModule):
                     )
                     return self._make_finding(
                         url, method, param_name, payload_tpl,
-                        expected, engine, evidence, phase,
+                        expected, engine, evidence, confidence,
                     )
 
         return None
@@ -191,21 +182,30 @@ class SSTIScanner(BaseModule):
         expected: str,
         payload: str,
         original_value: str,
+        baseline_html: str,
     ) -> Tuple[bool, str]:
-        """Return (True, evidence) if *expected* appears but the raw template syntax does not.
+        """Return (True, evidence) only when evaluation is confirmed and NOT a baseline artifact.
 
-        We require:
-          1. The evaluated result (e.g. "49") is in the response.
-          2. The raw template expression (e.g. "{{7*7}}") is NOT in the response
-             (if it is, the engine is echoing literal text, not evaluating).
-          3. The expected result was not already present in the original_value
-             (guard against a param like id=49 trivially matching).
+        Rules:
+          1. The evaluated result (e.g. "9851321") must be in the injected response.
+          2. The same result must NOT already be in the baseline response.
+             (Prevents false positives from UUIDs, phone numbers, static IDs.)
+          3. The raw template expression (e.g. "{{7331*6271}}") must NOT be in the
+             response -- if it is, the engine echoed literal text rather than evaluating.
+          4. The expected result must not equal the original parameter value.
         """
-        # Guard: expected result shouldn't be just the original value echoed
         if expected == original_value:
             return False, ""
 
         if expected not in html:
+            return False, ""
+
+        # KEY: expected result was already in the page before we injected anything
+        if expected in baseline_html:
+            logger.debug(
+                "[SSTI] skip: expected=%r already in baseline (not an evaluation)",
+                expected,
+            )
             return False, ""
 
         # Raw template still visible? Then it was not evaluated.
@@ -229,13 +229,12 @@ class SSTIScanner(BaseModule):
         expected: str,
         engine: str,
         evidence: str,
-        phase: str,
+        confidence: str,
     ) -> Finding:
-        confidence = "high" if phase == "unique-math" else "medium"
         params = {param_name: payload}
         curl = build_curl_command(url, method, params, param_name, payload)
         return Finding(
-            vuln_type=f"Server-Side Template Injection (SSTI)",
+            vuln_type="Server-Side Template Injection (SSTI)",
             url=url,
             method=method,
             parameter=param_name,

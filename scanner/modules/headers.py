@@ -138,28 +138,48 @@ class HeaderScanner(BaseModule):
         findings = []
         resp_headers_lower = {k.lower(): v for k, v in resp.headers.items()}
 
+        # CSP value (needed for several X-Frame-Options / X-XSS-Protection exemptions)
+        csp_value = resp_headers_lower.get("content-security-policy", "")
+
         for header_name, risk, remediation in _EXPECTED_HEADERS:
-            if header_name.lower() not in resp_headers_lower:
-                # HSTS only matters for HTTPS
-                if header_name == "Strict-Transport-Security" and not url.startswith("https"):
+            if header_name.lower() in resp_headers_lower:
+                continue
+
+            # HSTS only matters for HTTPS
+            if header_name == "Strict-Transport-Security" and not url.startswith("https"):
+                continue
+
+            # X-Frame-Options: skip if CSP already sets frame-ancestors.
+            # frame-ancestors in CSP takes precedence over X-Frame-Options in all
+            # modern browsers and is the recommended modern mechanism.
+            if header_name == "X-Frame-Options":
+                if "frame-ancestors" in csp_value.lower():
+                    logger.debug(
+                        "[Headers] Skipping X-Frame-Options: CSP frame-ancestors present (%s)",
+                        csp_value[:80],
+                    )
                     continue
 
-                findings.append(Finding(
-                    vuln_type=f"Missing Security Header: {header_name}",
-                    url=url,
-                    method="GET",
-                    parameter="(response headers)",
-                    payload="N/A",
-                    evidence=f"Header '{header_name}' is absent from the response",
-                    confidence="low",
-                    details=f"{risk}. {remediation}.",
-                    reproduction=(
-                        f"# 1. Inspect the response headers:\n"
-                        f"$ curl -s -k -I \"{url}\" | grep -i \"{header_name}\"\n"
-                        f"# 2. If no output, the header is missing.\n"
-                        f"# 3. Fix: {remediation}."
-                    ),
-                ))
+            # X-XSS-Protection: skip if CSP is present (CSP supersedes the legacy header)
+            if header_name == "X-XSS-Protection" and csp_value:
+                continue
+
+            findings.append(Finding(
+                vuln_type=f"Missing Security Header: {header_name}",
+                url=url,
+                method="GET",
+                parameter="(response headers)",
+                payload="N/A",
+                evidence=f"Header '{header_name}' is absent from the response",
+                confidence="low",
+                details=f"{risk}. {remediation}.",
+                reproduction=(
+                    f"# 1. Inspect the response headers:\n"
+                    f"$ curl -s -k -I \"{url}\" | grep -i \"{header_name}\"\n"
+                    f"# 2. If no output, the header is missing.\n"
+                    f"# 3. Fix: {remediation}."
+                ),
+            ))
 
         return findings
 

@@ -20,26 +20,31 @@ from ..parser import build_curl_command, inject_into_params, rebuild_url_with_pa
 
 logger = logging.getLogger("vulnscanner")
 
-# Unique token used for echo-based detection
-_ECHO_TOKEN = "okrscann7x3q"
+import random
+import string
 
-# (payload, description) -- output-based
-_OUTPUT_PAYLOADS: List[Tuple[str, str]] = [
-    # Unix
-    (f"; echo {_ECHO_TOKEN}", "semicolon + echo (Unix)"),
-    (f"| echo {_ECHO_TOKEN}", "pipe + echo (Unix)"),
-    (f"|| echo {_ECHO_TOKEN}", "or-pipe + echo (Unix)"),
-    (f"& echo {_ECHO_TOKEN}", "background + echo (Unix)"),
-    (f"&& echo {_ECHO_TOKEN}", "and + echo (Unix)"),
-    (f"`echo {_ECHO_TOKEN}`", "backtick + echo (Unix)"),
-    (f"$(echo {_ECHO_TOKEN})", "subshell + echo (Unix)"),
-    ("; cat /etc/passwd", "semicolon + cat passwd"),
-    ("| cat /etc/passwd", "pipe + cat passwd"),
-    # Windows
-    (f"& echo {_ECHO_TOKEN}", "background + echo (Windows)"),
-    (f"| echo {_ECHO_TOKEN}", "pipe + echo (Windows)"),
-    (f"&& echo {_ECHO_TOKEN}", "and + echo (Windows)"),
-]
+def _make_echo_token() -> str:
+    """Generate a unique per-scan token that is astronomically unlikely to appear
+    naturally in the target page or be a coincidence in search-term reflection."""
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    return f"okrscann_{suffix}"
+
+def _make_output_payloads(token: str) -> List[Tuple[str, str]]:
+    """Build echo-based payloads with the given per-scan token."""
+    return [
+        # Unix
+        (f"; echo {token}", "semicolon + echo (Unix)"),
+        (f"| echo {token}", "pipe + echo (Unix)"),
+        (f"|| echo {token}", "or-pipe + echo (Unix)"),
+        (f"`echo {token}`", "backtick + echo (Unix)"),
+        (f"$(echo {token})", "subshell + echo (Unix)"),
+        (f"&& echo {token}", "and + echo (Unix)"),
+        ("; cat /etc/passwd", "semicolon + cat passwd"),
+        ("| cat /etc/passwd", "pipe + cat passwd"),
+        # Windows
+        (f"& echo {token}", "background + echo (Windows/Unix)"),
+        (f"&& echo {token}", "and + echo (Windows)"),
+    ]
 
 # (template with {delay}, OS hint) -- time-based
 _TIME_PAYLOADS: List[Tuple[str, str]] = [
@@ -105,7 +110,17 @@ class CommandInjectionScanner(BaseModule):
     def _test_output_based(
         self, url, method, params, param_name,
     ) -> Optional[Finding]:
-        for payload, desc in _OUTPUT_PAYLOADS:
+        # Generate a unique per-scan token to minimise collision with page content
+        echo_token = _make_echo_token()
+        output_payloads = _make_output_payloads(echo_token)
+
+        # --- Baseline check: send JUST the token (no command prefix) ---
+        # If the token appears in the baseline response, this param reflects
+        # everything (e.g. a search field) -- echo detection would be meaningless.
+        baseline_resp = self._send(url, method, self._append(params, param_name, echo_token))
+        reflects_input = baseline_resp is not None and echo_token in baseline_resp.text
+
+        for payload, desc in output_payloads:
             # Append mode
             resp = self._send(url, method, self._append(params, param_name, payload))
             if resp is None:
@@ -114,7 +129,27 @@ class CommandInjectionScanner(BaseModule):
             body = resp.text
 
             # Check for echo token
-            if _ECHO_TOKEN in body:
+            if echo_token in body:
+                # Skip if the param reflects arbitrary input (search terms, form echo-back)
+                if reflects_input:
+                    logger.debug(
+                        "[CMDi/Output] %s: token found but param reflects all input -- skip (%s)",
+                        param_name, desc,
+                    )
+                    continue
+
+                # Additional check: distinguish real execution from search-term reflection.
+                # If the full payload string (including "echo ") appears literally, it's
+                # reflection of the search term, not command output.
+                # Real execution: only the token appears; "echo token" does NOT.
+                full_echo_string = f"echo {echo_token}"
+                if full_echo_string.lower() in body.lower():
+                    logger.debug(
+                        "[CMDi/Output] %s: full echo string reflected verbatim -- NOT execution (%s)",
+                        param_name, desc,
+                    )
+                    continue
+
                 full_payload = f"{params.get(param_name, '')}{payload}"
                 curl = build_curl_command(url, method, params, param_name, full_payload)
                 logger.debug("[CMDi/Output] %s: echo token found (%s)", param_name, desc)
@@ -124,7 +159,7 @@ class CommandInjectionScanner(BaseModule):
                     method=method,
                     parameter=param_name,
                     payload=full_payload,
-                    evidence=f"Echo token '{_ECHO_TOKEN}' reflected in response ({desc})",
+                    evidence=f"Echo token '{echo_token}' found in response without command prefix ({desc})",
                     confidence="high",
                     details=(
                         f"Command injection via {desc}. Injected command output appears "
@@ -134,8 +169,8 @@ class CommandInjectionScanner(BaseModule):
                     reproduction=(
                         f"# 1. Inject the command and look for the token in the response:\n"
                         f"{curl}\n"
-                        f"# 2. Search for '{_ECHO_TOKEN}' in the output.\n"
-                        f"#    If present, the server executed your echo command.\n"
+                        f"# 2. Search for '{echo_token}' in the output.\n"
+                        f"#    If present WITHOUT 'echo' before it, the server executed the command.\n"
                         f"# 3. Escalate with 'id' or 'whoami' to prove RCE:\n"
                         f"{build_curl_command(url, method, params, param_name, params.get(param_name, '') + '; id')}\n"
                         f"# 4. Look for output like 'uid=33(www-data)' to confirm OS access."

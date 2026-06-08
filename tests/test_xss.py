@@ -106,7 +106,7 @@ class TestXSSPayloadValidation(unittest.TestCase):
         body = f'<html><body><p>{payload}</p></body></html>'
         confirmed, evidence = XSSScanner._check_unencoded(body, payload)
         self.assertTrue(confirmed)
-        self.assertIn("Exact payload", evidence)
+        self.assertIn("verbatim", evidence)
 
     def test_onerror_fragment_detected(self):
         """onerror= appearing unencoded triggers detection."""

@@ -59,20 +59,6 @@ _PAYLOADS_SCRIPT = [
 # Combined default order (HTML first, then attr/script)
 _DEFAULT_PAYLOADS = _PAYLOADS_HTML + _PAYLOADS_ATTR + _PAYLOADS_SCRIPT
 
-# Markers that must survive unencoded for XSS to work
-_DANGEROUS_FRAGMENTS = [
-    ("<script>", "</script>"),
-    ("onerror=", None),
-    ("onload=", None),
-    ("onmouseover=", None),
-    ("onfocus=", None),
-    ("onclick=", None),
-    ("ontoggle=", None),
-    ("javascript:", None),
-    # "alert(" alone is not an XSS vector — a properly encoded page may contain it
-    # without the surrounding tags being exploitable.
-]
-
 
 class XSSScanner(BaseModule):
     """Detects reflected XSS vulnerabilities with context-aware payload selection."""
@@ -123,10 +109,21 @@ class XSSScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> Tuple[bool, str]:
-        """Inject a unique alphanumeric token and check whether it echoes back."""
+        """Inject a unique alphanumeric token and verify it echoes back unmodified.
+
+        Baseline check: if the token somehow appears in the response WITHOUT
+        injection (practically impossible for a random 8-hex suffix, but safe
+        to guard against), the probe is invalid.
+        """
         token = "xssprobe" + hashlib.md5(
             f"{param_name}{time.perf_counter()}".encode()
         ).hexdigest()[:8]
+
+        # Get baseline to confirm the token is not already in the page
+        baseline = self._send(url, method, params)
+        if baseline is not None and token.lower() in baseline.text.lower():
+            # Token appears without injection — astronomically rare, but skip if so
+            return False, "unknown"
 
         resp = self._send(url, method, inject_into_params(params, param_name, token))
         if resp is None or token.lower() not in resp.text.lower():
@@ -221,22 +218,24 @@ class XSSScanner(BaseModule):
 
     @staticmethod
     def _check_unencoded(html: str, payload: str) -> Tuple[bool, str]:
-        """Return (True, evidence_snippet) when payload appears unencoded in *html*."""
-        # Exact verbatim match is the strongest signal
+        """Return (True, evidence_snippet) only when the EXACT payload appears unencoded.
+
+        Why verbatim-only?
+        Pages always contain legitimate <script> tags, onerror= attributes, and
+        similar HTML from their own JavaScript. Checking for these fragments without
+        anchoring to the injected payload produces false positives on any page with
+        client-side code.
+
+        Verbatim match means: the scanner injected '<script>alert(1)</script>'
+        and that exact string appears in the response body without HTML-encoding.
+        If the site encodes < to &lt; the payload will not match — which is correct,
+        because a properly-encoded response is NOT vulnerable to XSS.
+        """
         if payload in html:
             idx = html.index(payload)
-            start, end = max(0, idx - 40), min(len(html), idx + len(payload) + 40)
+            start = max(0, idx - 40)
+            end = min(len(html), idx + len(payload) + 40)
             snippet = html[start:end].replace("\n", " ")
-            return True, f"Exact payload found in response: ...{snippet!r}..."
-
-        # Check for dangerous sub-fragments (event handlers, <script>, alert(, etc.)
-        html_lower = html.lower()
-        payload_lower = payload.lower()
-        for frag, closing in _DANGEROUS_FRAGMENTS:
-            if frag in payload_lower and frag in html_lower:
-                idx = html_lower.index(frag)
-                start, end = max(0, idx - 40), min(len(html), idx + len(frag) + 80)
-                snippet = html[start:end].replace("\n", " ")
-                return True, f"Dangerous fragment {frag!r} unencoded: ...{snippet!r}..."
+            return True, f"Payload reflected verbatim (unencoded): ...{snippet!r}..."
 
         return False, ""
