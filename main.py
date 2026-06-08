@@ -17,6 +17,7 @@ import sys
 import time
 from urllib.parse import urlparse
 
+from scanner import __version__
 from scanner.banner import print_banner
 from scanner.core import Scanner
 from scanner.logger import setup_logger
@@ -52,6 +53,10 @@ Examples
   # Custom payloads
   python main.py -u "http://target.local/?q=1" --scan-type sqli --payloads payloads/sqli.txt
         """,
+    )
+
+    parser.add_argument(
+        "--version", action="version", version=f"OkrScann v{__version__}",
     )
 
     # ---- Target ----

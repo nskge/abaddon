@@ -56,8 +56,8 @@ def _print_plain() -> None:
     print(f"  [>] Web Vulnerability Scanner   v{__version__}")
     print(f"  [>] CVE DB: {_CVE_COUNT} entries  ::  Metasploit-ready")
     print(f"  [>] Modules: SQLi  XSS  LFI  CMDi  SSTI  CRLF")
-    print(f"               Redirect  Headers  JWT  SSRF  XXE")
-    print(f"               403Bypass  GraphQL  CVE Detection")
+    print(f"               Redirect  Headers(CORS-active)  JWT  SSRF")
+    print(f"               XXE  403Bypass  GraphQL  CVE Detection")
     print()
     print("  [!] Authorized targets ONLY -- author assumes NO liability")
     print()
@@ -118,7 +118,7 @@ def _print_color() -> None:
     cve_line  = f"  [>] CVE DB : {_CVE_COUNT} entries  ::  Metasploit-ready"
     mod_line1 = f"  [>] Modules: SQLi  XSS  LFI  CMDi  SSTI  CRLF"
     mod_line2 = f"               Redirect  Headers  JWT  SSRF  XXE"
-    mod_line3 = f"               403Bypass  GraphQL  CVE  +WAF Evasion"
+    mod_line3 = f"               403Bypass  GraphQL  CVE  CORS-active  +WAF Evasion"
     warn_line = "  [!] Authorized targets ONLY -- author assumes NO liability"
 
     print(c(ver_line,  CYAN + BOLD))

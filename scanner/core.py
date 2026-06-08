@@ -226,6 +226,15 @@ class Scanner:
             param_names = sorted({t["param_name"] for t in targets})
             logger.info("Parameters: %s", param_names)
 
+            if not self.config.get("quiet", False):
+                n_mods = len(self.module_classes)
+                static_note = " [static/CDN — injection skipped]" if getattr(self, "_static_target", False) else ""
+                print(self._c(
+                    f"   [>] Scanning {len(targets)} target(s) × {n_mods} modules{static_note}",
+                    _CYAN,
+                ))
+                print()
+
             for target in targets:
                 self._scan_target(target)
 
@@ -832,6 +841,9 @@ class Scanner:
         param_name = target["param_name"]
 
         logger.info("  Testing param=%r [%s]", param_name, method)
+        if not self.config.get("quiet", False):
+            print(self._c(f"   ├─ param: ", _DIM) + self._c(f"{param_name!r}", _CYAN + _BOLD)
+                  + self._c(f"  [{method}]", _DIM))
 
         # Injection-only modules — skipped entirely on static/CDN targets
         _INJECTION_MODULES = {
@@ -891,18 +903,32 @@ class Scanner:
                             "    [VULN] %s  param=%r  confidence=%s",
                             f.vuln_type, f.parameter, f.confidence,
                         )
+                        # Print finding inline during scan (overwrite progress bar first)
+                        if not self.config.get("quiet", False):
+                            if sys.stdout.isatty():
+                                sys.stdout.write("\r" + " " * 70 + "\r")
+                            _conf_colors = {"high": _RED, "medium": _YELLOW, "low": _CYAN}
+                            _c = _conf_colors.get(f.confidence, _CYAN)
+                            print(self._c(
+                                f"   │  [!] {f.vuln_type} — {f.parameter!r} "
+                                f"[{f.confidence.upper()}]",
+                                _c + _BOLD,
+                            ))
                         self.findings.append(f)
                     # Inline progress (overwrite same line)
                     if not self.config.get("quiet", False) and sys.stdout.isatty():
-                        bar = "#" * done_count + "-" * (total_mods - done_count)
+                        pct = int(done_count / total_mods * 20)
+                        bar = "█" * pct + "░" * (20 - pct)
                         sys.stdout.write(
-                            f"\r    [{bar}] {done_count}/{total_mods} {mod_name} done  "
+                            f"\r   │  [{bar}] {done_count}/{total_mods} {mod_name}   "
                         )
                         sys.stdout.flush()
-                # Clear the progress line
-                if not self.config.get("quiet", False) and sys.stdout.isatty():
-                    sys.stdout.write("\r" + " " * 60 + "\r")
-                    sys.stdout.flush()
+                # Clear progress line and close the param block
+                if not self.config.get("quiet", False):
+                    if sys.stdout.isatty():
+                        sys.stdout.write("\r" + " " * 72 + "\r")
+                        sys.stdout.flush()
+                    print(self._c(f"   │  done ({total_mods} modules)", _DIM))
             except KeyboardInterrupt:
                 # Cancel futures that haven't started yet
                 for fut in futures:
