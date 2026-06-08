@@ -91,6 +91,18 @@ def _matches_any(text: str) -> Optional[str]:
     return None
 
 
+def _matches_any_new(text: str, baseline_text: str) -> Optional[str]:
+    """Return the first indicator that appears in *text* but NOT in *baseline_text*.
+
+    Prevents false positives from pages that already contain strings like
+    '127.0.0.1' or 'localhost' in their static content.
+    """
+    for pat in _COMPILED_INDICATORS:
+        if pat.search(text) and not pat.search(baseline_text):
+            return pat.search(text).group(0)  # type: ignore[union-attr]
+    return None
+
+
 class SSRFScanner(BaseModule):
     NAME = "ssrf"
 
@@ -115,10 +127,15 @@ class SSRFScanner(BaseModule):
         if not is_url_param:
             return findings
 
-        # Baseline for size comparison
-        baseline_resp = self.http.get(url, params=params)
+        # Baseline: capture normal response for false-positive filtering
+        baseline_resp = (
+            self.http.get(url, params=params)
+            if method == "GET"
+            else self.http.post(url, data=params)
+        )
         baseline_size = len(baseline_resp.text) if baseline_resp else 0
         baseline_status = baseline_resp.status_code if baseline_resp else 0
+        baseline_text = baseline_resp.text[:8192] if baseline_resp else ""
 
         def _probe(label: str, target_url: str) -> Optional[Finding]:
             test_params = {**params, param_name: target_url}
@@ -130,8 +147,13 @@ class SSRFScanner(BaseModule):
             if resp is None:
                 return None
 
+            # Skip if response identical to baseline — server ignored the URL param
+            if resp.text == baseline_resp.text if baseline_resp else False:
+                return None
+
             body = resp.text[:8192]
-            hit = _matches_any(body)
+            # Only flag indicators that are NEW in the payload response (not in baseline)
+            hit = _matches_any_new(body, baseline_text)
 
             # Confidence bump: 200 when baseline wasn't + larger body
             if hit is None:
