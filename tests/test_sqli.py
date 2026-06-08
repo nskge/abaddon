@@ -190,8 +190,10 @@ class TestSQLiTimeBased(unittest.TestCase):
         scanner = self._scanner()
         scanner.http.get.return_value = _make_response("Normal page")
 
-        # Patch perf_counter: baseline=0.1s, first payload=3.5s
-        times = iter([0.0, 0.1,   # baseline start/end
+        # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        times = iter([0.0, 0.1,   # baseline sample 1
+                      0.0, 0.1,   # baseline sample 2
+                      0.0, 0.1,   # baseline sample 3
                       0.0, 3.5])  # payload start/end
 
         with patch("scanner.modules.sqli.time.perf_counter", side_effect=times):
@@ -226,7 +228,10 @@ class TestSQLiTimeBased(unittest.TestCase):
         scanner = self._scanner()
         scanner.http.get.return_value = _make_response("Normal")
 
-        times = iter([0.0, 0.05,  # baseline
+        # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        times = iter([0.0, 0.05,  # baseline sample 1
+                      0.0, 0.05,  # baseline sample 2
+                      0.0, 0.05,  # baseline sample 3
                       0.0, 3.0])  # first append payload triggers
 
         with patch("scanner.modules.sqli.time.perf_counter", side_effect=times):

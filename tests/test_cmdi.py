@@ -176,8 +176,11 @@ class TestCMDiTimeBased(unittest.TestCase):
         scanner = self._scanner()
         scanner.http.get.return_value = _make_response("Normal")
 
-        times = iter([0.0, 0.1,   # baseline
-                      0.0, 3.5])  # first payload
+        # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        times = iter([0.0, 0.1,   # baseline sample 1
+                      0.0, 0.1,   # baseline sample 2
+                      0.0, 0.1,   # baseline sample 3
+                      0.0, 3.5])  # first payload triggers threshold
 
         with patch("scanner.modules.cmdi.time.perf_counter", side_effect=times):
             finding = scanner._test_time_based(

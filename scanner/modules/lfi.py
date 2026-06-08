@@ -109,7 +109,20 @@ class LFIScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> List[Finding]:
-        """Test *param_name* for LFI using the full payload list."""
+        """Test *param_name* for LFI using the full payload list.
+
+        Baseline comparison: fetch the page normally first and capture any
+        patterns that already exist (e.g. /etc/passwd content already shown,
+        or JS bundles containing passwd-like strings).  Only flag if the
+        indicator is NEW in the payload response.
+        """
+        # Baseline: normal request to see what the page already shows
+        if method == "GET":
+            baseline_resp = self.http.get(rebuild_url_with_params(url, params))
+        else:
+            baseline_resp = self.http.post(url, data=params)
+        baseline_text = baseline_resp.text if baseline_resp else ""
+
         payloads = self.load_payloads(_LFI_PAYLOADS, self.custom_payloads)
 
         for payload in payloads:
@@ -122,7 +135,14 @@ class LFIScanner(BaseModule):
             if resp is None:
                 continue
 
-            finding = self._validate(resp.text, payload, url, method, params, param_name)
+            # Skip if response is identical to baseline — server didn't process input
+            if resp.text == baseline_text:
+                continue
+
+            finding = self._validate(
+                resp.text, payload, url, method, params, param_name,
+                baseline_text=baseline_text,
+            )
             if finding:
                 return [finding]
 
@@ -140,8 +160,13 @@ class LFIScanner(BaseModule):
         method: str,
         params: Dict[str, str],
         param_name: str,
+        baseline_text: str = "",
     ) -> Optional[Finding]:
-        """Check the response body for file-read evidence."""
+        """Check the response body for file-read evidence.
+
+        *baseline_text* is the normal response before injection — any pattern
+        already present there is NOT a vulnerability.
+        """
 
         # PHP filter wrapper — expect base64-encoded source
         if "php://filter" in payload.lower() and "base64-encode" in payload.lower():
@@ -152,7 +177,7 @@ class LFIScanner(BaseModule):
         # Known file content signatures
         for target_file, patterns in _FILE_SIGS.items():
             for pattern in patterns:
-                if re.search(pattern, body):
+                if re.search(pattern, body) and not re.search(pattern, baseline_text):
                     snippet = self._snippet_around(body, pattern)
                     logger.debug(
                         "[LFI] %s=%r matched signature for %s",

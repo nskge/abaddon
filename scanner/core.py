@@ -626,7 +626,86 @@ class Scanner:
                 resp.status_code,
             )
 
+        # Static / CDN detection — must run AFTER the first response is received
+        self._static_target = self._detect_static_target(url, resp)
+
         return resp
+
+    def _detect_static_target(self, url: str, baseline_resp) -> bool:
+        """Return True if the server serves identical content for any input.
+
+        CDN-hosted SPAs (Firebase Hosting, Netlify, GitHub Pages) return the
+        same pre-compiled index.html for every request regardless of method,
+        params, or body.  On such targets every injection finding is a false
+        positive — the server never reads the payload.
+
+        Detection heuristic (two layers):
+          1. Cache header: x-cache=HIT or cf-cache-status=HIT → likely static.
+          2. Response-content stability: send a POST with random garbage and
+             compare body length+hash with the baseline GET.
+        """
+        import random
+        import string
+        import hashlib
+
+        baseline_len = len(baseline_resp.text)
+        baseline_hash = hashlib.md5(baseline_resp.text[:8192].encode("utf-8", "replace")).hexdigest()
+
+        # Layer 1: cache hit headers → almost certainly serving cached static
+        headers_lower = {k.lower(): v for k, v in baseline_resp.headers.items()}
+        x_cache = headers_lower.get("x-cache", "").upper()
+        cf_cache = headers_lower.get("cf-cache-status", "").upper()
+        served_by = headers_lower.get("x-served-by", "")
+        cache_hit = "HIT" in x_cache or "HIT" in cf_cache
+
+        # Layer 2: POST with garbage → if response is identical → static
+        token = "".join(random.choices(string.ascii_lowercase, k=10))
+        try:
+            r_post = self.http.post(url, data={f"okrscann_{token}": token})
+        except Exception:
+            r_post = None
+
+        responses_identical = (
+            r_post is not None
+            and len(r_post.text) == baseline_len
+            and hashlib.md5(r_post.text[:8192].encode("utf-8", "replace")).hexdigest() == baseline_hash
+        )
+
+        if cache_hit and responses_identical:
+            logger.warning(
+                "STATIC/CDN target detected (x-cache=HIT, POST==GET response). "
+                "Injection modules will be skipped — server ignores request body. "
+                "Only headers and recon checks will run. "
+                "To scan dynamic endpoints on this domain use --data or --js-crawl.",
+            )
+            return True
+
+        if responses_identical and r_post is not None:
+            # No cache header but content is identical — double-check with a GET variant
+            try:
+                r_get2 = self.http.get(url + f"?okrscann_{token}={token}")
+            except Exception:
+                r_get2 = None
+            if (
+                r_get2 is not None
+                and len(r_get2.text) == baseline_len
+                and hashlib.md5(r_get2.text[:8192].encode("utf-8", "replace")).hexdigest() == baseline_hash
+            ):
+                logger.warning(
+                    "STATIC target detected (GET/POST/GET+param all return identical content). "
+                    "Injection modules skipped. Only headers/recon checks will run."
+                )
+                return True
+
+        if cache_hit and not responses_identical:
+            logger.info(
+                "CDN cache HIT detected (%s%s) but responses differ — "
+                "target may be partially dynamic.  Scanning continues normally.",
+                x_cache or cf_cache,
+                f" via {served_by[:40]}" if served_by else "",
+            )
+
+        return False
 
     def _build_targets(
         self, url, method, data_string, target_param,
@@ -745,6 +824,13 @@ class Scanner:
 
         logger.info("  Testing param=%r [%s]", param_name, method)
 
+        # Injection-only modules — skipped entirely on static/CDN targets
+        _INJECTION_MODULES = {
+            "sqli", "xss", "lfi", "cmdi", "ssti", "crlf",
+            "redirect", "jwt", "ssrf", "xxe", "bypass403",
+        }
+        static = getattr(self, "_static_target", False)
+
         # Each module gets its own HTTPClient so they can scan in parallel
         # without sharing state (e.g. redirect following toggle).
         # The rate limiter IS shared -- it's the single global throttle.
@@ -761,11 +847,20 @@ class Scanner:
             return module.scan_parameter(url, method, params, param_name)
 
         # Run modules concurrently for speed
+        # On static/CDN targets, skip injection modules to avoid false positives
+        active_classes = [
+            cls for cls in self.module_classes
+            if not (static and cls.NAME in _INJECTION_MODULES)
+        ]
+        if static and len(active_classes) < len(self.module_classes):
+            skipped = [cls.NAME for cls in self.module_classes if cls not in active_classes]
+            logger.debug("Static target: skipping injection modules %s", skipped)
+
         max_workers = self.config.get("threads", _DEFAULT_WORKERS)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
                 pool.submit(_run_module, cls): cls.NAME
-                for cls in self.module_classes
+                for cls in active_classes
             }
             try:
                 total_mods = len(futures)

@@ -214,11 +214,48 @@ class CommandInjectionScanner(BaseModule):
     def _test_time_based(
         self, url, method, params, param_name,
     ) -> Optional[Finding]:
-        t0 = time.perf_counter()
-        baseline = self._send(url, method, params)
-        baseline_time = time.perf_counter() - t0
-        if baseline is None:
+        """Multi-sample time-based CMDi detection.
+
+        A single baseline measurement is unreliable on CDNs and high-latency
+        connections — one slow cache miss can fake a delay.  We take 3 baseline
+        samples, compute mean and standard deviation, and only flag when the
+        payload response exceeds mean + 3*std AND the server is stable enough
+        to trust (std < 2.0 s).  High std → CDN/unstable → skip entirely.
+        """
+        # Collect 3 baseline samples to establish mean and variance
+        _baseline_times: List[float] = []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            resp = self._send(url, method, params)
+            elapsed = time.perf_counter() - t0
+            if resp is not None:
+                _baseline_times.append(elapsed)
+
+        if not _baseline_times:
             return None
+
+        avg_baseline = sum(_baseline_times) / len(_baseline_times)
+        if len(_baseline_times) > 1:
+            variance = sum((t - avg_baseline) ** 2 for t in _baseline_times) / (len(_baseline_times) - 1)
+            std_baseline = variance ** 0.5
+        else:
+            std_baseline = avg_baseline * 0.5
+
+        # If baseline standard deviation > 2s, the server is too unstable
+        # (CDN jitter, high-latency network) — time-based detection is unreliable
+        if std_baseline > 2.0:
+            logger.debug(
+                "[CMDi/Time] %s: baseline std=%.2fs > 2s — server too unstable, skipping time-based",
+                param_name, std_baseline,
+            )
+            return None
+
+        # Dynamic threshold: baseline mean + 3 standard deviations
+        # Also require at least the configured delay seconds above the mean
+        threshold = max(
+            avg_baseline + self.delay,
+            avg_baseline + 3 * std_baseline + self.delay * 0.5,
+        )
 
         delay_sec = int(self.delay)
 
@@ -231,11 +268,11 @@ class CommandInjectionScanner(BaseModule):
             if resp is None:
                 continue
 
-            if elapsed >= self.delay and elapsed >= (baseline_time + self.delay * 0.8):
+            if elapsed >= threshold:
                 display = f"{params.get(param_name, '')}{suffix}"
                 logger.debug(
-                    "[CMDi/Time] %s=%r elapsed=%.2fs baseline=%.2fs (%s)",
-                    param_name, display, elapsed, baseline_time, os_hint,
+                    "[CMDi/Time] %s=%r elapsed=%.2fs threshold=%.2fs (avg=%.2fs std=%.2fs %s)",
+                    param_name, display, elapsed, threshold, avg_baseline, std_baseline, os_hint,
                 )
                 curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
@@ -245,21 +282,24 @@ class CommandInjectionScanner(BaseModule):
                     parameter=param_name,
                     payload=display,
                     evidence=(
-                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep "
-                        f"(baseline: {baseline_time:.2f}s, OS: {os_hint})"
+                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload "
+                        f"(baseline avg={avg_baseline:.2f}s ±{std_baseline:.2f}s, OS: {os_hint})"
                     ),
                     confidence="medium",
                     details=(
                         f"Time-based command injection ({os_hint}). "
+                        f"Payload caused {elapsed:.2f}s delay vs "
+                        f"{avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples). "
                         "Remediation: never pass user input to shell commands."
                     ),
                     reproduction=(
-                        f"# 1. Measure baseline response time:\n"
+                        f"# 1. Measure baseline response time (run 3x to confirm stability):\n"
                         f"$ time {build_curl_command(url, method, params, param_name, params.get(param_name, '')).lstrip('$ ')}\n"
                         f"# 2. Send the sleep payload and measure:\n"
                         f"$ time {curl.lstrip('$ ')}\n"
-                        f"# 3. If the second request takes ~{delay_sec}s longer,\n"
-                        f"#    it confirms time-based command injection ({os_hint})."
+                        f"# 3. If the second request takes ~{delay_sec}s longer than baseline,\n"
+                        f"#    it confirms time-based command injection ({os_hint}).\n"
+                        f"# Expected: baseline ~{avg_baseline:.1f}s vs payload ~{elapsed:.1f}s"
                     ),
                 )
         return None

@@ -126,14 +126,31 @@ class XXEScanner(BaseModule):
     # ------------------------------------------------------------------
 
     def _raw_xml_probe(self, url: str, param_name: str) -> List[Finding]:
-        """POST each XXE payload as a raw XML body."""
+        """POST each XXE payload as a raw XML body.
+
+        Baseline comparison: fetch the page once first (plain GET) and check
+        whether any indicator pattern is already in the baseline.  A static
+        site / CDN always returns the same body — its JS bundle may contain
+        long base64 blobs, passwd-like strings, etc. that look like XXE hits.
+        Only flag when the indicator is absent from the baseline.
+        """
+        # Baseline: plain GET to capture what the page normally contains
+        baseline_resp = self.http.get(url)
+        baseline_text = baseline_resp.text if baseline_resp else ""
+
         findings: List[Finding] = []
         for pl_name, body, indicators in _PAYLOADS:
+            # Skip this payload if ALL its indicators are already in baseline
+            if all(re.search(p, baseline_text) for p in indicators):
+                continue
             for ct in _XML_CONTENT_TYPES:
                 resp = self.http.raw_post(url, body=body, content_type=ct)
                 if resp is None:
                     continue
-                hit = self._check_indicators(resp.text, indicators)
+                # Response must differ from baseline for the finding to be real
+                if resp.text == baseline_text:
+                    continue
+                hit = self._check_indicators(resp.text, indicators, baseline_text)
                 if hit:
                     findings.append(self._make_finding(
                         url, "POST", param_name,
@@ -145,9 +162,22 @@ class XXEScanner(BaseModule):
     def _param_xml_inject(
         self, url: str, method: str, params: Dict[str, str], param_name: str,
     ) -> List[Finding]:
-        """Replace param value with XXE payload and send."""
+        """Replace param value with XXE payload and send.
+
+        Uses baseline comparison to avoid false positives from static pages.
+        """
+        # Baseline: normal request without payload modification
+        baseline_resp = (
+            self.http.get(url, params=params)
+            if method == "GET"
+            else self.http.post(url, data=params)
+        )
+        baseline_text = baseline_resp.text if baseline_resp else ""
+
         findings: List[Finding] = []
         for pl_name, body, indicators in _PAYLOADS:
+            if all(re.search(p, baseline_text) for p in indicators):
+                continue
             test_params = {**params, param_name: body}
             resp = (
                 self.http.get(url, params=test_params)
@@ -156,7 +186,9 @@ class XXEScanner(BaseModule):
             )
             if resp is None:
                 continue
-            hit = self._check_indicators(resp.text, indicators)
+            if resp.text == baseline_text:
+                continue
+            hit = self._check_indicators(resp.text, indicators, baseline_text)
             if hit:
                 findings.append(self._make_finding(
                     url, method, param_name,
@@ -170,9 +202,14 @@ class XXEScanner(BaseModule):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _check_indicators(text: str, indicators: List[str]) -> Optional[str]:
+    def _check_indicators(
+        text: str,
+        indicators: List[str],
+        baseline_text: str = "",
+    ) -> Optional[str]:
+        """Return the first indicator found in *text* but NOT in *baseline_text*."""
         for pattern in indicators:
-            if re.search(pattern, text):
+            if re.search(pattern, text) and not re.search(pattern, baseline_text):
                 return pattern
         return None
 

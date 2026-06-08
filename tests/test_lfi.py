@@ -32,7 +32,12 @@ class TestLFIEtcPasswd(unittest.TestCase):
             "nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n"
         )
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        # Call 1 = baseline (clean page), calls 2+ = payload responses with LFI content
+        call_count = [0]
+        def _get(url):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.get.side_effect = _get
 
         findings = scanner.scan_parameter(
             url="http://target.local/page",
@@ -51,7 +56,11 @@ class TestLFIEtcPasswd(unittest.TestCase):
         """A generic username:x:uid:gid: line is enough to confirm /etc/passwd."""
         body = "www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        call_count = [0]
+        def _get(url):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.get.side_effect = _get
 
         findings = scanner.scan_parameter(
             url="http://target.local/page",
@@ -102,7 +111,11 @@ class TestLFIWindowsWinIni(unittest.TestCase):
         """[fonts] section in response indicates windows/win.ini read."""
         body = "[fonts]\n[extensions]\n[mci extensions]\n[files]\n"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        call_count = [0]
+        def _get(url):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.get.side_effect = _get
 
         findings = scanner.scan_parameter(
             url="http://target.local/page",
@@ -118,7 +131,11 @@ class TestLFIWindowsWinIni(unittest.TestCase):
         """'for 16-bit app support' line from win.ini triggers detection."""
         body = "; for 16-bit app support\n[fonts]\n[extensions]\n"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        call_count = [0]
+        def _get(url):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.get.side_effect = _get
 
         findings = scanner.scan_parameter(
             url="http://target.local/page",
@@ -149,10 +166,14 @@ class TestLFIPHPFilter(unittest.TestCase):
         body = f"<html><body>{b64_blob}</body></html>"
 
         scanner = self._scanner()
-        # Always return the body containing the base64 blob.
-        # Non-filter payloads won't match the /etc/passwd signatures, so only
-        # the PHP filter decoder will produce a finding.
-        scanner.http.get.return_value = _make_response(body)
+        # Call 1 = baseline (clean page), calls 2+ = payload responses.
+        # Non-filter payloads won't match /etc/passwd signatures; only the
+        # php://filter payload response triggers PHP filter decoder.
+        call_count = [0]
+        def _get(url):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.get.side_effect = _get
 
         findings = scanner.scan_parameter(
             url="http://target.local/page",
@@ -188,7 +209,12 @@ class TestLFIPostMethod(unittest.TestCase):
     def test_lfi_detected_via_post(self):
         body = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:\n"
         scanner = LFIScanner(MagicMock(), {})
-        scanner.http.post.return_value = _make_response(body)
+        # Call 1 = baseline (clean page), calls 2+ = payload responses with LFI content
+        call_count = [0]
+        def _post(url, data=None):
+            call_count[0] += 1
+            return _make_response("") if call_count[0] == 1 else _make_response(body)
+        scanner.http.post.side_effect = _post
 
         findings = scanner.scan_parameter(
             url="http://target.local/download",

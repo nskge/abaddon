@@ -428,13 +428,44 @@ class SQLiScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> Optional[Finding]:
-        """Measure response delay caused by SLEEP / WAITFOR / pg_sleep payloads."""
-        t0 = time.perf_counter()
-        baseline_resp = self._send(url, method, params)
-        baseline_time = time.perf_counter() - t0
-        if baseline_resp is None:
+        """Multi-sample time-based blind SQLi detection.
+
+        Takes 3 baseline measurements to establish mean + standard deviation.
+        Skips detection when std > 2s (CDN/unstable server — false positive risk).
+        Threshold = avg + max(delay, 3*std + delay*0.5).
+        """
+        _baseline_times: List[float] = []
+        baseline_resp = None
+        for _ in range(3):
+            t0 = time.perf_counter()
+            r = self._send(url, method, params)
+            elapsed = time.perf_counter() - t0
+            if r is not None:
+                _baseline_times.append(elapsed)
+                baseline_resp = r
+
+        if not _baseline_times or baseline_resp is None:
             return None
 
+        avg_baseline = sum(_baseline_times) / len(_baseline_times)
+        if len(_baseline_times) > 1:
+            variance = sum((t - avg_baseline) ** 2 for t in _baseline_times) / (len(_baseline_times) - 1)
+            std_baseline = variance ** 0.5
+        else:
+            std_baseline = avg_baseline * 0.5
+
+        # CDN/unstable — skip time-based to avoid false positives
+        if std_baseline > 2.0:
+            logger.debug(
+                "[SQLi/Time] %s: baseline std=%.2fs > 2s — too unstable, skipping",
+                param_name, std_baseline,
+            )
+            return None
+
+        threshold = max(
+            avg_baseline + self.delay,
+            avg_baseline + 3 * std_baseline + self.delay * 0.5,
+        )
         delay_sec = int(self.delay)
 
         for template, dbms, append_mode in _TIME_PAYLOADS:
@@ -454,10 +485,10 @@ class SQLiScanner(BaseModule):
             if resp is None:
                 continue
 
-            if elapsed >= self.delay and elapsed >= (baseline_time + self.delay * 0.8):
+            if elapsed >= threshold:
                 logger.debug(
                     "[SQLi/Time] %s=%r elapsed=%.2fs baseline=%.2fs (%s)",
-                    param_name, display, elapsed, baseline_time, dbms,
+                    param_name, display, elapsed, avg_baseline, dbms,
                 )
                 curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
@@ -468,22 +499,22 @@ class SQLiScanner(BaseModule):
                     payload=display,
                     evidence=(
                         f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload "
-                        f"(baseline: {baseline_time:.2f}s, DBMS hint: {dbms})"
+                        f"(baseline avg={avg_baseline:.2f}s ±{std_baseline:.2f}s, DBMS: {dbms})"
                     ),
                     confidence="medium",
                     details=(
                         f"Time-based blind SQLi ({dbms}): payload caused {elapsed:.2f}s "
-                        f"delay vs {baseline_time:.2f}s baseline. "
+                        f"delay vs {avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples). "
                         "Remediation: use parameterised queries / prepared statements."
                     ),
                     reproduction=(
-                        f"# 1. Measure baseline response time:\n"
+                        f"# 1. Measure baseline response time (run 3x to confirm stability):\n"
                         f"$ time {build_curl_command(url, method, params, param_name, params.get(param_name, '')).lstrip('$ ')}\n"
                         f"# 2. Send the time-based payload and measure delay:\n"
                         f"$ time {curl.lstrip('$ ')}\n"
                         f"# 3. If the second request takes ~{delay_sec}s longer than baseline,\n"
                         f"#    it confirms time-based blind SQLi ({dbms}).\n"
-                        f"# Expected: baseline ~{baseline_time:.1f}s vs payload ~{elapsed:.1f}s"
+                        f"# Expected: baseline ~{avg_baseline:.1f}s vs payload ~{elapsed:.1f}s"
                     ),
                 )
         return None
