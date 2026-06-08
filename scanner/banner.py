@@ -4,7 +4,10 @@ from scanner import __version__
 from scanner.cve_db import _CVE_DB
 
 _CVE_COUNT = len(_CVE_DB)
-_MODULE_LIST = "SQLi  XSS  LFI  CMDi  SSTI  CRLF  Redirect  Headers"
+_MODULE_LIST = (
+    "SQLi  XSS  LFI  CMDi  SSTI  CRLF  "
+    "Redirect  Headers  JWT  SSRF  XXE  403Bypass"
+)
 
 # Hand-crafted logo -- ASCII-safe for all terminal encodings (Windows cp1252+)
 _LOGO = r"""
@@ -52,7 +55,9 @@ def _print_plain() -> None:
     print()
     print(f"  [>] Web Vulnerability Scanner   v{__version__}")
     print(f"  [>] CVE DB: {_CVE_COUNT} entries  ::  Metasploit-ready")
-    print(f"  [>] Modules: {_MODULE_LIST}")
+    print(f"  [>] Modules: SQLi  XSS  LFI  CMDi  SSTI  CRLF")
+    print(f"               Redirect  Headers  JWT  SSRF  XXE")
+    print(f"               403Bypass  CVE Detection")
     print()
     print("  [!] Authorized targets ONLY -- author assumes NO liability")
     print()
@@ -109,16 +114,18 @@ def _print_color() -> None:
     print()
 
     # Stats block below the frame
-    ver_line    = f"  [>] Web Vulnerability Scanner  v{__version__}"
-    cve_line    = f"  [>] CVE DB : {_CVE_COUNT} entries  ::  Metasploit-ready"
-    mod_line1   = f"  [>] Modules: SQLi  XSS  LFI  CMDi  SSTI  CRLF"
-    mod_line2   = f"               Redirect  Headers  CVE Detection"
-    warn_line   = "  [!] Authorized targets ONLY -- author assumes NO liability"
+    ver_line  = f"  [>] Web Vulnerability Scanner  v{__version__}"
+    cve_line  = f"  [>] CVE DB : {_CVE_COUNT} entries  ::  Metasploit-ready"
+    mod_line1 = f"  [>] Modules: SQLi  XSS  LFI  CMDi  SSTI  CRLF"
+    mod_line2 = f"               Redirect  Headers  JWT  SSRF  XXE"
+    mod_line3 = f"               403Bypass  CVE Detection  +WAF Evasion"
+    warn_line = "  [!] Authorized targets ONLY -- author assumes NO liability"
 
     print(c(ver_line,  CYAN + BOLD))
     print(c(cve_line,  GREEN))
     print(c(mod_line1, WHITE))
     print(c(mod_line2, WHITE))
+    print(c(mod_line3, WHITE))
     print()
     print(c(warn_line, YELLOW))
     print()

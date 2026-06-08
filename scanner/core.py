@@ -15,6 +15,7 @@ from .modules.base import Finding
 from .modules.cmdi import CommandInjectionScanner
 from .modules.crlf import CRLFScanner
 from .modules.headers import HeaderScanner
+from .modules.bypass403 import Bypass403Scanner
 from .modules.jwt_analyzer import JWTAnalyzer
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
@@ -44,17 +45,18 @@ _WAF_SIGNATURES = [
 logger = logging.getLogger("vulnscanner")
 
 _MODULE_MAP = {
-    "sqli":     SQLiScanner,
-    "xss":      XSSScanner,
-    "lfi":      LFIScanner,
-    "redirect": OpenRedirectScanner,
-    "cmdi":     CommandInjectionScanner,
-    "crlf":     CRLFScanner,
-    "ssti":     SSTIScanner,
-    "headers":  HeaderScanner,
-    "jwt":      JWTAnalyzer,
-    "ssrf":     SSRFScanner,
-    "xxe":      XXEScanner,
+    "sqli":      SQLiScanner,
+    "xss":       XSSScanner,
+    "lfi":       LFIScanner,
+    "redirect":  OpenRedirectScanner,
+    "cmdi":      CommandInjectionScanner,
+    "crlf":      CRLFScanner,
+    "ssti":      SSTIScanner,
+    "headers":   HeaderScanner,
+    "jwt":       JWTAnalyzer,
+    "ssrf":      SSRFScanner,
+    "xxe":       XXEScanner,
+    "bypass403": Bypass403Scanner,
 }
 
 # ANSI helpers for recon display

