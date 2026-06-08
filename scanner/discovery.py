@@ -171,6 +171,42 @@ _TAKEOVER_FINGERPRINTS: List[Dict] = [
         "body_pattern": r"The page you are looking for doesn't exist",
         "confidence": "medium",
     },
+    {
+        "service": "Vercel",
+        "cname_pattern": r"\.vercel\.app$|\.now\.sh$",
+        "body_pattern": r"The deployment could not be found|404: NOT_FOUND",
+        "confidence": "high",
+    },
+    {
+        "service": "Render",
+        "cname_pattern": r"\.onrender\.com$",
+        "body_pattern": r"Service not found|Not Found",
+        "confidence": "medium",
+    },
+    {
+        "service": "Surge.sh",
+        "cname_pattern": r"\.surge\.sh$",
+        "body_pattern": r"project not found",
+        "confidence": "high",
+    },
+    {
+        "service": "Fly.io",
+        "cname_pattern": r"\.fly\.dev$",
+        "body_pattern": r"404: This site is not deployed yet",
+        "confidence": "high",
+    },
+    {
+        "service": "Squarespace",
+        "cname_pattern": r"\.squarespace\.com$",
+        "body_pattern": r"No Such Account|this domain is not connected to a Squarespace website",
+        "confidence": "high",
+    },
+    {
+        "service": "Wix",
+        "cname_pattern": r"\.wixsite\.com$",
+        "body_pattern": r"This site doesn't exist",
+        "confidence": "medium",
+    },
 ]
 
 
