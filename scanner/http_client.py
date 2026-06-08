@@ -1,4 +1,4 @@
-"""Session-based HTTP client with proxy, cookie and retry support."""
+"""Session-based HTTP client with proxy, cookie, retry, and rate-limit support."""
 
 from typing import Dict, Optional
 import logging
@@ -24,6 +24,10 @@ class HTTPClient:
 
     All requests silently return ``None`` on timeout or connection error so that
     scanner modules can treat a ``None`` response as "skip this payload".
+
+    An optional :class:`~scanner.rate_limiter.AdaptiveRateLimiter` can be
+    injected; when present, ``wait()`` is called before every request and
+    ``record()`` is called with the response status code.
     """
 
     def __init__(
@@ -34,9 +38,11 @@ class HTTPClient:
         timeout: int = 10,
         follow_redirects: bool = True,
         verify_ssl: bool = False,
+        rate_limiter=None,
     ) -> None:
         self.timeout = timeout
         self.follow_redirects = follow_redirects
+        self._rate_limiter = rate_limiter
 
         self._session = requests.Session()
 
@@ -87,7 +93,25 @@ class HTTPClient:
         """Send a POST request; return the response or None on failure."""
         return self._request("POST", url, data=data, **kwargs)
 
+    def raw_post(
+        self,
+        url: str,
+        body: str,
+        content_type: str = "application/xml",
+    ) -> Optional[requests.Response]:
+        """Send a POST with a raw string body and a custom Content-Type.
+
+        Useful for XXE probing and SOAP/REST XML injection.
+        """
+        return self._request(
+            "POST", url,
+            data=body.encode("utf-8", errors="replace"),
+            headers={"Content-Type": content_type},
+        )
+
     def _request(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
+        if self._rate_limiter is not None:
+            self._rate_limiter.wait()
         try:
             response = self._session.request(
                 method,
@@ -96,6 +120,8 @@ class HTTPClient:
                 allow_redirects=self.follow_redirects,
                 **kwargs,
             )
+            if self._rate_limiter is not None:
+                self._rate_limiter.record(response.status_code)
             return response
         except requests.exceptions.Timeout:
             logger.debug("Timeout: %s %s", method, url)

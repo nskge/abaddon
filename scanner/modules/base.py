@@ -106,18 +106,40 @@ class BaseModule(ABC):
 
         Lines starting with '#' and blank lines are skipped.
         Falls back to *defaults* on any file-read error.
+
+        If ``config["waf_evasion"]`` is set (int 1–3), the base list is
+        expanded with encoded/obfuscated variants via
+        :func:`scanner.waf_evasion.apply_evasion`.
         """
         if not payload_file:
-            return defaults
-        try:
-            with open(payload_file, "r", encoding="utf-8") as fh:
-                loaded = [
-                    line.strip()
-                    for line in fh
-                    if line.strip() and not line.startswith("#")
-                ]
-            logger.debug("Loaded %d payloads from %s", len(loaded), payload_file)
-            return loaded
-        except OSError as exc:
-            logger.warning("Cannot read payload file %s (%s) — using defaults.", payload_file, exc)
-            return defaults
+            base = defaults
+        else:
+            try:
+                with open(payload_file, "r", encoding="utf-8") as fh:
+                    base = [
+                        line.strip()
+                        for line in fh
+                        if line.strip() and not line.startswith("#")
+                    ]
+                logger.debug("Loaded %d payloads from %s", len(base), payload_file)
+            except OSError as exc:
+                logger.warning(
+                    "Cannot read payload file %s (%s) -- using defaults.",
+                    payload_file, exc,
+                )
+                base = defaults
+
+        evasion_level = self.config.get("waf_evasion", 0)
+        if evasion_level:
+            try:
+                from scanner.waf_evasion import apply_evasion
+                expanded = apply_evasion(base, level=int(evasion_level))
+                logger.debug(
+                    "WAF evasion level %d: %d -> %d payloads",
+                    evasion_level, len(base), len(expanded),
+                )
+                return expanded
+            except Exception as exc:
+                logger.debug("WAF evasion error: %s", exc)
+
+        return base

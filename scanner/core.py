@@ -15,11 +15,14 @@ from .modules.base import Finding
 from .modules.cmdi import CommandInjectionScanner
 from .modules.crlf import CRLFScanner
 from .modules.headers import HeaderScanner
+from .modules.jwt_analyzer import JWTAnalyzer
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
 from .modules.sqli import SQLiScanner
 from .modules.ssti import SSTIScanner
+from .modules.ssrf import SSRFScanner
 from .modules.xss import XSSScanner
+from .modules.xxe import XXEScanner
 from .parser import (
     extract_forms,
     extract_params_from_url,
@@ -41,14 +44,17 @@ _WAF_SIGNATURES = [
 logger = logging.getLogger("vulnscanner")
 
 _MODULE_MAP = {
-    "sqli": SQLiScanner,
-    "xss": XSSScanner,
-    "lfi": LFIScanner,
+    "sqli":     SQLiScanner,
+    "xss":      XSSScanner,
+    "lfi":      LFIScanner,
     "redirect": OpenRedirectScanner,
-    "cmdi": CommandInjectionScanner,
-    "crlf": CRLFScanner,
-    "ssti": SSTIScanner,
-    "headers": HeaderScanner,
+    "cmdi":     CommandInjectionScanner,
+    "crlf":     CRLFScanner,
+    "ssti":     SSTIScanner,
+    "headers":  HeaderScanner,
+    "jwt":      JWTAnalyzer,
+    "ssrf":     SSRFScanner,
+    "xxe":      XXEScanner,
 }
 
 # ANSI helpers for recon display
@@ -130,12 +136,20 @@ class Scanner:
         self._seen_keys: set = set()  # dedup: (vuln_type, url, param, payload)
         self._no_color = config.get("no_color", False)
 
+        # Adaptive rate limiter (shared across all module threads)
+        self._rate_limiter = None
+        if config.get("rate_limit"):
+            from .rate_limiter import AdaptiveRateLimiter
+            min_d = float(config.get("rate_limit_delay", 0.0))
+            self._rate_limiter = AdaptiveRateLimiter(min_delay=min_d)
+
         self.http = HTTPClient(
             headers=config.get("headers", {}),
             cookies=config.get("cookies", {}),
             proxy=config.get("proxy"),
             timeout=config.get("timeout", 10),
             follow_redirects=config.get("follow_redirects", True),
+            rate_limiter=self._rate_limiter,
         )
 
         scan_type = config.get("scan_type", "all")
@@ -289,6 +303,22 @@ class Scanner:
                 self._print_cve_box(cve_matches)
                 self._create_cve_findings(cve_matches, url, parsed)
 
+        # -- Port scan (opt-in) --
+        if self.config.get("port_scan") and ip != "N/A":
+            self._run_port_scan(ip, hostname)
+
+        # -- Path discovery (opt-in) --
+        if self.config.get("discover_paths"):
+            base = f"{parsed.scheme}://{parsed.netloc}"
+            self._run_path_discovery(base)
+
+        # -- Subdomain enumeration (opt-in) --
+        if self.config.get("discover_subs") and hostname:
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                domain = ".".join(parts[-2:])
+                self._run_subdomain_enum(domain)
+
     def _print_cve_box(self, matches: List[dict]) -> None:
         """Display matched CVEs in a styled box below recon."""
         n = len(matches)
@@ -408,6 +438,95 @@ class Scanner:
             if key not in self._seen_keys:
                 self._seen_keys.add(key)
                 self.findings.append(finding)
+
+    # ------------------------------------------------------------------
+    # Port scan display
+    # ------------------------------------------------------------------
+
+    def _run_port_scan(self, ip: str, hostname: str) -> None:
+        from .port_scanner import scan_ports
+        print(self._c("   +--- Port Scan ---", _DIM))
+        print(self._c(f"   | Scanning {hostname} ({ip}) ...", _DIM))
+        results = scan_ports(ip)
+        if not results:
+            print(self._c("   | No open ports found in common list.", _DIM))
+        else:
+            for r in results:
+                banner = f"  [{r['banner'][:60]}]" if r["banner"] and r["banner"] != "open" else ""
+                svc_c = _YELLOW if r["port"] not in (80, 443) else _GREEN
+                print(
+                    self._c("   | ", _DIM)
+                    + self._c(f"{r['port']:5d}/tcp", svc_c)
+                    + self._c(f"  {r['service']:<20}", _CYAN)
+                    + self._c(banner, _DIM)
+                )
+        print(self._c("   +-------------------", _DIM))
+        print()
+
+    # ------------------------------------------------------------------
+    # Path discovery display
+    # ------------------------------------------------------------------
+
+    def _run_path_discovery(self, base_url: str) -> None:
+        from .discovery import discover_paths
+        http = HTTPClient(
+            headers=self.config.get("headers", {}),
+            cookies=self.config.get("cookies", {}),
+            proxy=self.config.get("proxy"),
+            timeout=self.config.get("timeout", 6),
+        )
+        print(self._c("   +--- Path Discovery ---", _DIM))
+        print(self._c(f"   | Probing {base_url} ...", _DIM))
+        results = discover_paths(base_url, http)
+        if not results:
+            print(self._c("   | No interesting paths found.", _DIM))
+        else:
+            for r in results:
+                code = r["status"]
+                if code == 200:
+                    cc = _GREEN
+                elif code in (301, 302):
+                    cc = _CYAN
+                elif code == 401:
+                    cc = _YELLOW
+                elif code == 403:
+                    cc = _RED
+                else:
+                    cc = _DIM
+                size_kb = f"{r['size'] / 1024:.1f}KB"
+                print(
+                    self._c("   | ", _DIM)
+                    + self._c(f"[{code}]", cc)
+                    + self._c(f"  {r['path']:<45}", "\033[97m")
+                    + self._c(f"  {size_kb}", _DIM)
+                )
+        print(self._c("   +----------------------", _DIM))
+        print()
+
+    # ------------------------------------------------------------------
+    # Subdomain enumeration display
+    # ------------------------------------------------------------------
+
+    def _run_subdomain_enum(self, domain: str) -> None:
+        from .discovery import enumerate_subdomains
+        print(self._c("   +--- Subdomain Enumeration ---", _DIM))
+        print(self._c(f"   | Enumerating *.{domain} ...", _DIM))
+        results = enumerate_subdomains(domain)
+        if not results:
+            print(self._c("   | No live subdomains found.", _DIM))
+        else:
+            for fqdn, ip in results:
+                print(
+                    self._c("   | ", _DIM)
+                    + self._c(f"{fqdn:<45}", _CYAN + _BOLD)
+                    + self._c(f"  {ip}", _YELLOW)
+                )
+        print(self._c("   +-----------------------------", _DIM))
+        print()
+
+    # ------------------------------------------------------------------
+    # Technology fingerprinting
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _fingerprint(resp) -> List[str]:
@@ -551,7 +670,8 @@ class Scanner:
         logger.info("  Testing param=%r [%s]", param_name, method)
 
         # Each module gets its own HTTPClient so they can scan in parallel
-        # without sharing state (e.g. redirect following toggle)
+        # without sharing state (e.g. redirect following toggle).
+        # The rate limiter IS shared -- it's the single global throttle.
         def _run_module(module_cls):
             http_copy = HTTPClient(
                 headers=self.config.get("headers", {}),
@@ -559,6 +679,7 @@ class Scanner:
                 proxy=self.config.get("proxy"),
                 timeout=self.config.get("timeout", 10),
                 follow_redirects=self.config.get("follow_redirects", True),
+                rate_limiter=self._rate_limiter,
             )
             module = module_cls(http_copy, self.config)
             return module.scan_parameter(url, method, params, param_name)

@@ -12,8 +12,10 @@ written permission to test. Unauthorized use may violate applicable laws.
 """
 
 import argparse
+import fnmatch
 import sys
 import time
+from urllib.parse import urlparse
 
 from scanner.banner import print_banner
 from scanner.core import Scanner
@@ -75,7 +77,10 @@ Examples
     scan = parser.add_argument_group("Scan options")
     scan.add_argument(
         "--scan-type",
-        choices=["sqli", "xss", "lfi", "redirect", "cmdi", "crlf", "ssti", "headers", "all"],
+        choices=[
+            "sqli", "xss", "lfi", "redirect", "cmdi", "crlf",
+            "ssti", "headers", "jwt", "ssrf", "xxe", "all",
+        ],
         default="all",
         help="Vulnerability type to scan for  (default: all)",
     )
@@ -95,6 +100,60 @@ Examples
     scan.add_argument(
         "--threads", type=int, default=4, metavar="N",
         help="Max concurrent module threads per parameter  (default: 4)",
+    )
+    scan.add_argument(
+        "--waf-evasion", type=int, default=0, choices=[0, 1, 2, 3], metavar="LEVEL",
+        help=(
+            "Expand payloads with WAF bypass variants  "
+            "0=off  1=url+null  2=+double+case  3=+html+sqli-comments  (default: 0)"
+        ),
+    )
+
+    # ---- Recon extras ----
+    recon = parser.add_argument_group("Recon extras")
+    recon.add_argument(
+        "--port-scan", action="store_true",
+        help="Run a fast TCP port scan during recon phase",
+    )
+    recon.add_argument(
+        "--discover-paths", action="store_true",
+        help="Probe common URL paths on the target during recon",
+    )
+    recon.add_argument(
+        "--discover-subs", action="store_true",
+        help="Enumerate common subdomains of the target domain during recon",
+    )
+
+    # ---- Rate limiting ----
+    rate = parser.add_argument_group("Rate limiting")
+    rate.add_argument(
+        "--rate-limit", action="store_true",
+        help="Enable adaptive rate limiter (auto back-off on 429/503)",
+    )
+    rate.add_argument(
+        "--rate-delay", type=float, default=0.0, metavar="SECS",
+        help="Minimum delay between requests when rate limiting is on  (default: 0.0)",
+    )
+
+    # ---- Bug bounty ----
+    bb = parser.add_argument_group("Bug bounty")
+    bb.add_argument(
+        "--bb-note", metavar="EMAIL",
+        help=(
+            "Add X-Bug-Bounty header to all requests identifying you as the researcher. "
+            "e.g. --bb-note researcher@example.com"
+        ),
+    )
+    bb.add_argument(
+        "--bb-program", metavar="PROGRAM",
+        help="Bug bounty program name appended to User-Agent  e.g. h1/program-slug",
+    )
+    bb.add_argument(
+        "--scope", metavar="PATTERNS",
+        help=(
+            "Comma-separated allowed scope patterns  e.g. '*.example.com,api.example.com'. "
+            "The scanner will warn and abort if the target is out of scope."
+        ),
     )
 
     # ---- HTTP ----
@@ -127,6 +186,18 @@ def main() -> int:
     parser = _build_arg_parser()
     args = parser.parse_args()
 
+    # Scope check (before anything else)
+    if args.scope:
+        patterns = [p.strip() for p in args.scope.split(",") if p.strip()]
+        target_host = urlparse(args.url).hostname or ""
+        if not any(fnmatch.fnmatch(target_host, pat) for pat in patterns):
+            print(
+                f"[!] OUT OF SCOPE: '{target_host}' does not match scope patterns: "
+                + ", ".join(patterns)
+            )
+            print("    Aborting to avoid scanning out-of-scope targets.")
+            return 2
+
     # Print banner (suppressed in quiet mode)
     use_color = not args.no_color
     if not args.quiet:
@@ -141,8 +212,21 @@ def main() -> int:
             if ":" in h:
                 k, v = h.split(":", 1)
                 headers[k.strip()] = v.strip()
-    if args.user_agent:
-        headers["User-Agent"] = args.user_agent
+
+    # Bug bounty identification headers
+    if args.bb_note:
+        headers["X-Bug-Bounty"] = args.bb_note
+        headers["X-HackerOne-Research"] = args.bb_note
+
+    # User-Agent: optionally append BB program slug
+    ua = args.user_agent or (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    )
+    if args.bb_program:
+        ua = f"{ua} (BugBounty/{args.bb_program})"
+    headers["User-Agent"] = ua
 
     # Build cookies dict
     cookies: dict = {}
@@ -171,6 +255,15 @@ def main() -> int:
         "verbose": args.verbose,
         "quiet": args.quiet,
         "no_color": args.no_color,
+        # New features
+        "waf_evasion":      args.waf_evasion,
+        "port_scan":        args.port_scan,
+        "discover_paths":   args.discover_paths,
+        "discover_subs":    args.discover_subs,
+        "rate_limit":       args.rate_limit,
+        "rate_limit_delay": args.rate_delay,
+        "bb_note":          args.bb_note,
+        "bb_program":       args.bb_program,
     }
 
     scanner = Scanner(config, logger)
