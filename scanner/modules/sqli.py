@@ -164,9 +164,16 @@ class SQLiScanner(BaseModule):
         params: Dict[str, str],
         param_name: str,
     ) -> List[Finding]:
-        """Run all three SQLi detection strategies against *param_name*."""
+        """Run all three SQLi detection strategies against *param_name*.
+
+        A single baseline request is taken upfront and shared across all three
+        strategies to avoid the cost of separate baseline calls per strategy.
+        """
+        baseline_resp = self._send(url, method, params)
+        baseline_text = baseline_resp.text if baseline_resp is not None else ""
+
         finding = (
-            self._test_error_based(url, method, params, param_name)
+            self._test_error_based(url, method, params, param_name, baseline_text)
             or self._test_boolean_based(url, method, params, param_name)
             or self._test_time_based(url, method, params, param_name)
         )
@@ -199,18 +206,24 @@ class SQLiScanner(BaseModule):
         method: str,
         params: Dict[str, str],
         param_name: str,
+        baseline_text: str = "",
     ) -> Optional[Finding]:
         """Inject malformed SQL and look for DB error messages in the response.
 
         Tests append-mode first (critical for numeric parameters like id=1),
-        then falls back to replace-mode payloads.
+        then falls back to replace-mode payloads.  *baseline_text* is compared
+        so that SQL error strings already present in the normal page (e.g. a
+        page that mentions "mysql" in a tutorial) do not trigger a false positive.
         """
+        baseline_lower = baseline_text.lower()
+
         # Append-mode: e.g. id=1 → id=1'
         for suffix in _APPEND_ERROR_SUFFIXES:
             injected_params = self._append(params, param_name, suffix)
             finding = self._check_error_response(
                 url, method, injected_params, param_name,
                 display_payload=f"{params.get(param_name, '')}{suffix}",
+                baseline_lower=baseline_lower,
             )
             if finding:
                 return finding
@@ -221,6 +234,7 @@ class SQLiScanner(BaseModule):
             finding = self._check_error_response(
                 url, method, injected_params, param_name,
                 display_payload=payload,
+                baseline_lower=baseline_lower,
             )
             if finding:
                 return finding
@@ -234,14 +248,23 @@ class SQLiScanner(BaseModule):
         injected_params: Dict,
         param_name: str,
         display_payload: str,
+        baseline_lower: str = "",
     ) -> Optional[Finding]:
-        """Send one request and check the response for SQL error signatures."""
+        """Send one request and check the response for SQL error signatures.
+
+        Only flags a pattern if it is NOT already present in *baseline_lower*,
+        preventing false positives on pages that mention database names in their
+        static content (e.g. documentation, tutorial pages).
+        """
         resp = self._send(url, method, injected_params)
         if resp is None:
             return None
 
         body_lower = resp.text.lower()
         for pattern, dbms in _ERROR_SIGS:
+            # Skip patterns already present in the baseline response
+            if re.search(pattern, baseline_lower, re.IGNORECASE):
+                continue
             if re.search(pattern, body_lower, re.IGNORECASE):
                 match = re.search(pattern, body_lower, re.IGNORECASE)
                 start = max(0, match.start() - 30)

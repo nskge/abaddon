@@ -30,7 +30,8 @@ class TestSQLiErrorBased(unittest.TestCase):
         """Append-mode: id=1' triggers MySQL syntax error (most common case)."""
         body = "Warning: mysql_fetch_array() expects parameter 1 to be resource"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        # Call 1: baseline (clean), calls 2+: injected responses with the error
+        scanner.http.get.side_effect = [_make_response("")] + [_make_response(body)] * 30
 
         findings = scanner.scan_parameter(
             url="http://target.local/cat.php",
@@ -50,7 +51,7 @@ class TestSQLiErrorBased(unittest.TestCase):
         """'you have an error in your sql syntax' triggers MySQL detection."""
         body = "You have an error in your SQL syntax; check the manual"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        scanner.http.get.side_effect = [_make_response("")] + [_make_response(body)] * 30
 
         findings = scanner.scan_parameter("http://t.local/", "GET", {"id": "1"}, "id")
         self.assertEqual(len(findings), 1)
@@ -60,7 +61,7 @@ class TestSQLiErrorBased(unittest.TestCase):
         """MSSQL 'incorrect syntax near' triggers error-based detection."""
         body = "Incorrect syntax near the keyword 'OR'."
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        scanner.http.get.side_effect = [_make_response("")] + [_make_response(body)] * 30
 
         findings = scanner.scan_parameter("http://t.local/", "GET", {"id": "1"}, "id")
         self.assertEqual(len(findings), 1)
@@ -70,7 +71,7 @@ class TestSQLiErrorBased(unittest.TestCase):
         """ORA-xxxxx error pattern triggers Oracle detection."""
         body = "ORA-01756: quoted string not properly terminated"
         scanner = self._scanner()
-        scanner.http.get.return_value = _make_response(body)
+        scanner.http.get.side_effect = [_make_response("")] + [_make_response(body)] * 30
 
         findings = scanner.scan_parameter("http://t.local/", "GET", {"id": "1"}, "id")
         self.assertEqual(len(findings), 1)
@@ -85,6 +86,20 @@ class TestSQLiErrorBased(unittest.TestCase):
         findings = scanner.scan_parameter("http://t.local/", "GET", {"id": "1"}, "id")
         self.assertEqual(len(findings), 0)
 
+    def test_error_in_baseline_not_flagged(self):
+        """SQL error already in baseline page must NOT be reported (false positive prevention).
+
+        This guards against pages that mention 'mysql' or 'sql syntax' in their
+        static content (e.g. a tutorial or documentation site).
+        """
+        body = "You have an error in your SQL syntax; check the manual"
+        scanner = self._scanner()
+        # Both baseline AND injected responses contain the same SQL error string
+        scanner.http.get.return_value = _make_response(body)
+
+        findings = scanner.scan_parameter("http://t.local/", "GET", {"id": "1"}, "id")
+        self.assertEqual(len(findings), 0, "Must not flag errors already present in baseline")
+
     def test_none_response_skipped(self):
         """None (timeout/network error) is handled gracefully."""
         scanner = self._scanner()
@@ -97,7 +112,8 @@ class TestSQLiErrorBased(unittest.TestCase):
         """Error-based detection works with POST requests."""
         body = "You have an error in your SQL syntax near 'OR'"
         scanner = self._scanner()
-        scanner.http.post.return_value = _make_response(body)
+        # Call 1: baseline (clean), calls 2+: injected responses with the error
+        scanner.http.post.side_effect = [_make_response("")] + [_make_response(body)] * 30
 
         findings = scanner.scan_parameter(
             url="http://target.local/login",
