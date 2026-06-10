@@ -17,6 +17,7 @@ from .modules.crlf import CRLFScanner
 from .modules.headers import HeaderScanner
 from .modules.bypass403 import Bypass403Scanner
 from .modules.graphql import GraphQLScanner
+from .modules.idor import IDORScanner
 from .modules.jwt_analyzer import JWTAnalyzer
 from .modules.lfi import LFIScanner
 from .modules.open_redirect import OpenRedirectScanner
@@ -59,6 +60,7 @@ _MODULE_MAP = {
     "xxe":       XXEScanner,
     "bypass403": Bypass403Scanner,
     "graphql":   GraphQLScanner,
+    "idor":      IDORScanner,
 }
 
 # ANSI helpers for recon display

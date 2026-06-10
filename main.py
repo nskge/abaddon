@@ -85,7 +85,7 @@ Examples
         choices=[
             "sqli", "xss", "lfi", "redirect", "cmdi", "crlf",
             "ssti", "headers", "jwt", "ssrf", "xxe", "bypass403",
-            "graphql", "all",
+            "graphql", "idor", "all",
         ],
         default="all",
         help="Vulnerability type to scan for  (default: all)",

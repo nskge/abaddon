@@ -9,7 +9,7 @@
 ```
 
 **Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.  
-Fast, accurate, and report-ready. — **v2.10.3**
+Fast, accurate, and report-ready. — **v2.11.0**
 
 > **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
 
@@ -32,6 +32,7 @@ Fast, accurate, and report-ready. — **v2.10.3**
 | **XXE** | Raw XML POST, XML param injection, XML-hinted params — 6 payload variants |
 | **403 Bypass** | Header spoofing (X-Original-URL, X-Forwarded-For, …), path manipulation (16 variants), verb tampering |
 | **GraphQL** | Introspection exposure, GraphiQL/Playground IDE, batch queries, field suggestions — 12 common endpoint paths probed |
+| **IDOR** | Numeric ID and UUID parameter enumeration, path-segment ID traversal — dual-baseline stability guard, size-similarity gate to suppress false positives |
 | **CVE Detection** | 34 CVEs across 14 services (Apache, Nginx, PHP, IIS, Tomcat, OpenSSL, jQuery, WordPress, Drupal, Struts, Spring, WebLogic, Confluence, Joomla) with CVSS, Metasploit modules, NVD links |
 
 ---
@@ -51,7 +52,7 @@ Fast, accurate, and report-ready. — **v2.10.3**
 - **Ctrl+C recovery** — graceful interrupt returns all findings collected so far
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
-- **256 unit tests**
+- **285 unit tests**
 
 ---
 
@@ -131,7 +132,7 @@ Target:
 
 Scan options:
   --scan-type TYPE      sqli|xss|lfi|redirect|cmdi|crlf|ssti|headers|
-                        jwt|ssrf|xxe|bypass403|graphql|all  (default: all)
+                        jwt|ssrf|xxe|bypass403|graphql|idor|all  (default: all)
   --crawl               Auto-detect HTML forms
   --js-crawl            JS-aware crawl via headless Chromium (finds SPA inputs)
   --payloads FILE       Custom payload file (one per line)
@@ -175,7 +176,7 @@ Output:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 256 tests
+python -m pytest tests/ -v     # 285 tests
 ```
 
 ---
@@ -210,7 +211,8 @@ scanner/
     ├── ssrf.py
     ├── xxe.py
     ├── bypass403.py
-    └── graphql.py
+    ├── graphql.py
+    └── idor.py
 js_crawler.py            Playwright-based JS crawl for SPA/modal input discovery
 ```
 
