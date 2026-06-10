@@ -186,6 +186,19 @@ class CRLFScanner(BaseModule):
         # Check 3: body injection marker
         for marker in _BODY_MARKERS:
             if marker in resp.text:
+                # Sanity check: does the page simply reflect any string we send?
+                # (XSS-reflective search pages echo all URL params verbatim.)
+                # Send the marker WITHOUT the CRLF prefix — if the marker still
+                # appears, this is XSS-style reflection, NOT response splitting.
+                plain_resp = self._send(
+                    url, method, inject_into_params(params, param_name, marker),
+                )
+                if plain_resp is not None and marker in plain_resp.text:
+                    logger.debug(
+                        "[CRLF] body marker appears via plain reflection — not CRLF, skipping",
+                    )
+                    continue
+
                 curl = build_curl_command(url, method, params, param_name, payload)
                 return Finding(
                     vuln_type="CRLF Injection (Response Splitting)",

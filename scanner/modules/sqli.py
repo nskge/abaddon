@@ -323,6 +323,11 @@ class SQLiScanner(BaseModule):
         """Compare responses for always-true vs always-false SQL conditions.
 
         Tests append-mode AND pairs first (numeric-safe), then replace-mode OR pairs.
+
+        Stability check: two baseline requests are taken before any injection.
+        If the responses differ significantly (ads, timestamps, CSRF nonces make pages
+        dynamic), boolean detection is skipped entirely — those pages would produce
+        false positives with any size-based comparison strategy.
         """
         baseline = self._send(url, method, params)
         if baseline is None:
@@ -333,6 +338,20 @@ class SQLiScanner(BaseModule):
         tolerance = max(30, int(baseline_len * 0.10))
         # Meaningful difference: at least 10 % of baseline (min 50 bytes)
         min_diff = max(50, int(baseline_len * 0.10))
+
+        # Stability check: a second clean request reveals dynamic pages.
+        # If the two baselines differ by more than the tolerance, the page
+        # changes between requests (ads, random tokens, timestamps) — boolean
+        # detection would be meaningless and prone to false positives.
+        baseline2 = self._send(url, method, params)
+        if baseline2 is not None:
+            drift = abs(len(baseline2.text) - baseline_len)
+            if drift > tolerance:
+                logger.debug(
+                    "[SQLi/Boolean] page is dynamic (baseline1=%d baseline2=%d drift=%d) — skip",
+                    baseline_len, len(baseline2.text), drift,
+                )
+                return None
 
         # --- Append-mode AND pairs (numeric-safe) ---
         for true_sfx, false_sfx in _APPEND_AND_PAIRS:

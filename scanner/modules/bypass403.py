@@ -10,10 +10,20 @@ The module runs once per URL regardless of how many parameters exist.
 """
 
 import concurrent.futures
+import re
 import urllib.parse
 from typing import Dict, List, Optional, Tuple
 
 from .base import BaseModule, Finding
+
+# Phrases that indicate a 200 response is still an error/denial page,
+# not a successful bypass.  Common in WAFs that return 200 with custom
+# "access denied" HTML rather than a proper 403 status code.
+_DENIAL_RE = re.compile(
+    r"access[\s\-]?denied|you are not authorized|not authorized|"
+    r"permission denied|403 forbidden|blocked by|security check",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Bypass techniques
@@ -59,9 +69,25 @@ _PATH_BYPASSES: List[Tuple[str, callable]] = [
 _VERB_BYPASSES: List[str] = ["HEAD", "OPTIONS", "POST", "PATCH", "PUT"]
 
 
-def _is_bypass(original_status: int, resp_status: int) -> bool:
-    """True if response status suggests the block was bypassed."""
-    return original_status in (403, 401) and resp_status in (200, 201, 204)
+def _is_bypass(original_status: int, resp) -> bool:
+    """True if response indicates the block was genuinely bypassed.
+
+    Guards against WAFs/CDNs that return HTTP 200 with an "access denied"
+    HTML body (custom error pages), or near-empty responses that are just
+    quirks of the server rather than real content access.
+    """
+    if original_status not in (403, 401):
+        return False
+    if resp.status_code not in (200, 201, 204):
+        return False
+    body = resp.text or ""
+    # Very short body on a 200 is likely a server quirk, not real access
+    if resp.status_code == 200 and len(body) < 100:
+        return False
+    # Body contains denial language → still blocked, just with wrong status code
+    if _DENIAL_RE.search(body[:3000]):
+        return False
+    return True
 
 
 class Bypass403Scanner(BaseModule):
@@ -105,7 +131,7 @@ class Bypass403Scanner(BaseModule):
                 for k, v in header_template.items()
             }
             resp = self.http.get(url, params=params, headers=headers)
-            if resp is not None and _is_bypass(blocked_status, resp.status_code):
+            if resp is not None and _is_bypass(blocked_status, resp):
                 f = self._make_finding(
                     url, method, params, blocked_status, resp.status_code,
                     f"Header: {headers}",
@@ -127,7 +153,7 @@ class Bypass403Scanner(BaseModule):
             except Exception:
                 return None
             resp = self.http.get(new_url, params=params)
-            if resp is not None and _is_bypass(blocked_status, resp.status_code):
+            if resp is not None and _is_bypass(blocked_status, resp):
                 return (pname, new_url, resp.status_code)
             return None
 
@@ -152,7 +178,7 @@ class Bypass403Scanner(BaseModule):
         # --- Strategy 3: HTTP verb bypass ---
         for verb in _VERB_BYPASSES:
             resp = self.http._request(verb, url, params=params)
-            if resp is not None and _is_bypass(blocked_status, resp.status_code):
+            if resp is not None and _is_bypass(blocked_status, resp):
                 f = self._make_finding(
                     url, method, params, blocked_status, resp.status_code,
                     f"Verb: {verb}",

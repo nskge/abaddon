@@ -9,7 +9,7 @@
 ```
 
 **Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.  
-Fast, accurate, and report-ready. — **v2.10.1**
+Fast, accurate, and report-ready. — **v2.10.2**
 
 > **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
 

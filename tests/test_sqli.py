@@ -144,8 +144,8 @@ class TestSQLiBooleanBased(unittest.TestCase):
         scanner = self._scanner()
         scanner._test_error_based = lambda *a, **kw: None  # skip error phase
 
-        # baseline + all AND pairs true/false
-        scanner.http.get.side_effect = [baseline] + [true_resp, false_resp] * 10
+        # Two stable baselines (stability check) + AND pairs
+        scanner.http.get.side_effect = [baseline, baseline] + [true_resp, false_resp] * 10
 
         finding = scanner._test_boolean_based(
             url="http://target.local/cat.php",
@@ -183,7 +183,8 @@ class TestSQLiBooleanBased(unittest.TestCase):
 
         scanner = self._scanner()
         scanner._test_error_based = lambda *a, **kw: None
-        scanner.http.get.side_effect = [baseline] + [true_resp, false_resp] * 10
+        # Two stable baselines (stability check) + pairs
+        scanner.http.get.side_effect = [baseline, baseline] + [true_resp, false_resp] * 10
 
         finding = scanner._test_boolean_based(
             url="http://target.local/page",
@@ -193,6 +194,25 @@ class TestSQLiBooleanBased(unittest.TestCase):
         )
 
         self.assertIsNotNone(finding)
+
+    def test_dynamic_page_boolean_skipped(self):
+        """Dynamic pages with varying response sizes skip boolean detection (false positive prevention)."""
+        # Two baselines that differ significantly (dynamic ads, nonces, timestamps)
+        baseline1 = _make_response("A" * 500)
+        baseline2 = _make_response("A" * 800)  # >10% drift → dynamic page
+
+        scanner = self._scanner()
+        scanner._test_error_based = lambda *a, **kw: None
+        scanner.http.get.side_effect = [baseline1, baseline2]
+
+        finding = scanner._test_boolean_based(
+            url="http://target.local/page",
+            method="GET",
+            params={"id": "1"},
+            param_name="id",
+        )
+
+        self.assertIsNone(finding, "Dynamic pages must not trigger boolean SQLi false positives")
 
 
 class TestSQLiTimeBased(unittest.TestCase):

@@ -106,8 +106,33 @@ class TestCRLFBodyInjection(unittest.TestCase):
         return CRLFScanner(MagicMock(), {})
 
     def test_body_marker_detected(self):
-        """Injected body content triggers response splitting finding."""
+        """Injected body content triggers response splitting finding when NOT mere reflection."""
         scanner = self._scanner()
+
+        marker_resp = _make_response(
+            text="<html><okrscann>injected</okrscann></html>",
+            headers={"Content-Type": "text/html"},
+        )
+        clean_resp = _make_response(text="<html>clean</html>", headers={"Content-Type": "text/html"})
+
+        # call 1: CRLF payload returns marker in body
+        # call 2: sanity check (plain marker, no CRLF) returns clean → NOT mere reflection
+        call_count = [0]
+        def _get(url, **kwargs):
+            call_count[0] += 1
+            return marker_resp if call_count[0] == 1 else clean_resp
+        scanner.http.get.side_effect = _get
+
+        findings = scanner.scan_parameter(
+            "http://t.local/page", "GET", {"q": "test"}, "q",
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Response Splitting", findings[0].vuln_type)
+
+    def test_body_marker_via_reflection_not_flagged(self):
+        """If marker appears via XSS-style reflection (not CRLF), no finding is raised."""
+        scanner = self._scanner()
+        # Both CRLF-injected call AND plain sanity check echo the marker → reflection, not CRLF
         scanner.http.get.return_value = _make_response(
             text="<html><okrscann>injected</okrscann></html>",
             headers={"Content-Type": "text/html"},
@@ -116,8 +141,7 @@ class TestCRLFBodyInjection(unittest.TestCase):
         findings = scanner.scan_parameter(
             "http://t.local/page", "GET", {"q": "test"}, "q",
         )
-        self.assertEqual(len(findings), 1)
-        self.assertIn("Response Splitting", findings[0].vuln_type)
+        self.assertEqual(len(findings), 0, "Reflection of marker must not be flagged as CRLF injection")
 
 
 class TestCRLFEdgeCases(unittest.TestCase):

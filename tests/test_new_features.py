@@ -479,20 +479,36 @@ class TestHTTPClientRateLimiter:
 # ---------------------------------------------------------------------------
 
 class TestBypass403Helpers:
+    """_is_bypass now takes (original_status, resp) — resp has .status_code and .text."""
+
+    def _resp(self, status, text=None):
+        r = MagicMock()
+        r.status_code = status
+        r.text = text if text is not None else ("X" * 200)
+        return r
+
     def test_is_bypass_true_for_200_after_403(self):
-        assert _is_bypass(403, 200) is True
+        assert _is_bypass(403, self._resp(200)) is True
 
     def test_is_bypass_true_for_204_after_401(self):
-        assert _is_bypass(401, 204) is True
+        assert _is_bypass(401, self._resp(204)) is True
 
     def test_is_bypass_false_when_still_403(self):
-        assert _is_bypass(403, 403) is False
+        assert _is_bypass(403, self._resp(403)) is False
 
     def test_is_bypass_false_when_original_200(self):
-        assert _is_bypass(200, 200) is False
+        assert _is_bypass(200, self._resp(200)) is False
 
     def test_is_bypass_false_for_500(self):
-        assert _is_bypass(403, 500) is False
+        assert _is_bypass(403, self._resp(500)) is False
+
+    def test_is_bypass_false_for_short_200_body(self):
+        """200 response with < 100 bytes body is likely a server quirk, not real access."""
+        assert _is_bypass(403, self._resp(200, text="OK")) is False
+
+    def test_is_bypass_false_for_denial_phrase_in_body(self):
+        """200 with 'access denied' in body is a WAF custom error page, not a bypass."""
+        assert _is_bypass(403, self._resp(200, text="X" * 200 + " access denied")) is False
 
     def test_header_repro_contains_curl(self):
         repro = _header_repro("http://t.com/admin", {}, {"X-Forwarded-For": "127.0.0.1"})
@@ -542,14 +558,15 @@ class TestBypass403Scanner:
         """X-Forwarded-For spoofing returns 200 -- should produce a finding."""
         http = _make_http()
         call_count = [0]
+        _REAL_PAGE = "Admin panel content " * 10  # >=100 bytes, no denial phrases
 
         def get_side_effect(url, params=None, headers=None, **kw):
             call_count[0] += 1
             if call_count[0] == 1:
                 return _mock_resp(403, "Forbidden")   # baseline
-            # Any call with extra headers returns 200
+            # Any call with extra headers returns 200 with real content
             if headers:
-                return _mock_resp(200, "Admin panel")
+                return _mock_resp(200, _REAL_PAGE)
             return _mock_resp(403, "Forbidden")
 
         http.get.side_effect = get_side_effect
@@ -564,9 +581,10 @@ class TestBypass403Scanner:
     def test_verb_bypass_detected(self):
         """OPTIONS verb returns 200 after 403 GET -- should produce a finding."""
         http = _make_http()
+        _REAL_PAGE = "Restricted content visible now " * 5  # >=100 bytes, no denial phrases
         # All GET calls return 403, but _request with OPTIONS returns 200
         http.get.return_value = _mock_resp(403, "Forbidden")
-        http._request = MagicMock(return_value=_mock_resp(200, "OK"))
+        http._request = MagicMock(return_value=_mock_resp(200, _REAL_PAGE))
         mod = self._make_mod(http)
         findings = mod.scan_parameter(
             "http://t.com/restricted", "GET", {"x": "1"}, "x"
@@ -589,9 +607,10 @@ class TestBypass403Scanner:
     def test_finding_has_reproduction_steps(self):
         """Produced findings must include curl-based reproduction commands."""
         http = _make_http()
+        _REAL_PAGE = "Bypassed admin content here " * 5  # >=100 bytes, no denial phrases
         http.get.side_effect = [
             _mock_resp(403, "Forbidden"),
-            _mock_resp(200, "bypass!"),  # first header bypass
+            _mock_resp(200, _REAL_PAGE),  # first header bypass with real content
         ]
         mod = self._make_mod(http)
         findings = mod.scan_parameter(
