@@ -283,6 +283,93 @@ class TestSQLiTimeBased(unittest.TestCase):
         self.assertIn("1", finding.payload)
 
 
+class TestSQLiORMInjection(unittest.TestCase):
+    """Django ORM filter injection detection."""
+
+    def _scanner(self):
+        return SQLiScanner(MagicMock(), {})
+
+    def test_orm_injection_detected_via_id_gte(self):
+        """id__gte=0 returning more data than filtered baseline signals ORM injection."""
+        scanner = self._scanner()
+        # baseline: filtered results (~1KB)
+        # probe with id__gte=0: all records (~10KB)
+        baseline_resp = _make_response("A" * 1000)
+        expanded_resp = _make_response("A" * 12000)  # >20% expansion
+
+        call_count = [0]
+        def _get(url, **kwargs):
+            call_count[0] += 1
+            # First call (baseline in scan_parameter) → filtered size
+            # All probes that return expanded → id__gte=0 match
+            return expanded_resp if call_count[0] > 1 else baseline_resp
+        scanner.http.get.side_effect = _get
+
+        finding = scanner._test_orm_injection(
+            url="http://target.local/list",
+            method="GET",
+            params={"title__icontains": "aaa"},
+            param_name="title__icontains",
+            baseline_text="A" * 1000,
+        )
+
+        self.assertIsNotNone(finding)
+        self.assertIn("ORM Injection", finding.vuln_type)
+        self.assertEqual(finding.confidence, "high")
+
+    def test_orm_injection_skipped_for_plain_params(self):
+        """Parameters without '__' are skipped — not Django ORM syntax."""
+        scanner = self._scanner()
+        scanner.http.get.return_value = _make_response("A" * 1000)
+
+        finding = scanner._test_orm_injection(
+            url="http://target.local/",
+            method="GET",
+            params={"id": "1"},
+            param_name="id",
+            baseline_text="A" * 1000,
+        )
+        self.assertIsNone(finding)
+
+    def test_orm_injection_no_expansion_no_finding(self):
+        """If all probes return similar response size, no finding is raised."""
+        scanner = self._scanner()
+        scanner.http.get.return_value = _make_response("A" * 1000)
+
+        finding = scanner._test_orm_injection(
+            url="http://target.local/list",
+            method="GET",
+            params={"title__icontains": "aaa"},
+            param_name="title__icontains",
+            baseline_text="A" * 1000,
+        )
+        self.assertIsNone(finding)
+
+    def test_orm_injection_reproduction_has_traversal_steps(self):
+        """Finding reproduction must include relationship traversal examples."""
+        scanner = self._scanner()
+        baseline_resp = _make_response("A" * 1000)
+        expanded_resp = _make_response("A" * 12000)
+
+        call_count = [0]
+        def _get(url, **kwargs):
+            call_count[0] += 1
+            return expanded_resp if call_count[0] > 1 else baseline_resp
+        scanner.http.get.side_effect = _get
+
+        finding = scanner._test_orm_injection(
+            url="http://target.local/list",
+            method="GET",
+            params={"title__icontains": "aaa"},
+            param_name="title__icontains",
+            baseline_text="A" * 1000,
+        )
+
+        self.assertIsNotNone(finding)
+        self.assertIn("user__password", finding.reproduction)
+        self.assertIn("user__email", finding.reproduction)
+
+
 class TestSQLiInjectHelpers(unittest.TestCase):
     """Unit tests for _append and _replace injection helpers."""
 

