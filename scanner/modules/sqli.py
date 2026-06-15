@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
+from ..confirm import confirm_time_based
 from ..parser import build_curl_command, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
@@ -371,7 +372,17 @@ class SQLiScanner(BaseModule):
                 r_true, r_false, true_pl, false_pl,
             )
             if finding:
-                return finding
+                if self._reconfirm_bool(
+                    url, method, params, param_name, true_sfx, false_sfx,
+                    append=True, baseline_len=baseline_len,
+                    tolerance=tolerance, min_diff=min_diff,
+                ):
+                    return finding
+                logger.debug(
+                    "[SQLi/Boolean/AND] %s: candidate not reproducible on re-test — "
+                    "discarding (FP guard)", param_name,
+                )
+                continue
 
         # --- Replace-mode OR pairs ---
         for true_pl, false_pl in _REPLACE_BOOL_PAIRS:
@@ -386,9 +397,74 @@ class SQLiScanner(BaseModule):
                 r_true, r_false, true_pl, false_pl,
             )
             if finding:
-                return finding
+                if self._reconfirm_bool(
+                    url, method, params, param_name, true_pl, false_pl,
+                    append=False, baseline_len=baseline_len,
+                    tolerance=tolerance, min_diff=min_diff,
+                ):
+                    return finding
+                logger.debug(
+                    "[SQLi/Boolean/OR] %s: candidate not reproducible on re-test — "
+                    "discarding (FP guard)", param_name,
+                )
+                continue
 
         return None
+
+    @staticmethod
+    def _classify_bool_pair(
+        r_true, r_false, baseline_len: int, tolerance: int, min_diff: int,
+    ) -> Optional[str]:
+        """Return the signal kind ("AND"/"OR"/"status-code") for a true/false
+        response pair, or ``None`` when the pair shows no boolean-SQLi signal."""
+        t_len = len(r_true.text)
+        f_len = len(r_false.text)
+        diff = abs(t_len - f_len)
+
+        true_near_baseline = abs(t_len - baseline_len) <= tolerance
+        false_near_baseline = abs(f_len - baseline_len) <= tolerance
+
+        if true_near_baseline and diff >= min_diff:
+            return "AND"
+        if false_near_baseline and diff >= min_diff:
+            return "OR"
+        if r_true.status_code != r_false.status_code:
+            return "status-code"
+        return None
+
+    def _reconfirm_bool(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+        true_str: str,
+        false_str: str,
+        *,
+        append: bool,
+        baseline_len: int,
+        tolerance: int,
+        min_diff: int,
+    ) -> bool:
+        """Re-send the same true/false pair and require the signal to reproduce.
+
+        Dynamic pages (ads, nonces, timestamps) produce a size delta once by
+        chance but rarely reproduce the *same* delta a second time.  Requiring
+        the signal to survive a re-test is the single biggest false-positive
+        guard for size-based boolean detection.
+        """
+        if append:
+            r_true = self._send(url, method, self._append(params, param_name, true_str))
+            r_false = self._send(url, method, self._append(params, param_name, false_str))
+        else:
+            r_true = self._send(url, method, self._replace(params, param_name, true_str))
+            r_false = self._send(url, method, self._replace(params, param_name, false_str))
+
+        if r_true is None or r_false is None:
+            return False
+        return self._classify_bool_pair(
+            r_true, r_false, baseline_len, tolerance, min_diff,
+        ) is not None
 
     def _evaluate_bool_pair(
         self,
@@ -405,26 +481,18 @@ class SQLiScanner(BaseModule):
     ) -> Optional[Finding]:
         """Determine if the true/false response pair signals blind SQLi.
 
-        False-positive guard: send the TRUE condition a second time and verify
-        the two TRUE responses are consistent.  On dynamic pages (ads, nonces,
-        timestamps) both sizes will vary randomly — those are not SQLi.
+        The actual classification lives in :meth:`_classify_bool_pair` so the
+        same logic can be reused by :meth:`_reconfirm_bool` for the re-test that
+        guards against dynamic-page false positives.
         """
         t_len = len(r_true.text)
         f_len = len(r_false.text)
         diff  = abs(t_len - f_len)
 
-        true_near_baseline  = abs(t_len - baseline_len) <= tolerance
-        false_near_baseline = abs(f_len - baseline_len) <= tolerance
-
-        # Pattern A: TRUE ≈ baseline, FALSE diverges  (AND injection)
-        pattern_a = true_near_baseline and diff >= min_diff
-        # Pattern B: FALSE ≈ baseline, TRUE diverges  (OR injection expands results)
-        pattern_b = false_near_baseline and diff >= min_diff
-        # Pattern C: status codes differ
-        pattern_c = r_true.status_code != r_false.status_code
-
-        if pattern_a or pattern_b or pattern_c:
-            kind = "AND" if pattern_a else ("OR" if pattern_b else "status-code")
+        kind = self._classify_bool_pair(
+            r_true, r_false, baseline_len, tolerance, min_diff,
+        )
+        if kind is not None:
             logger.debug(
                 "[SQLi/Boolean/%s] %s: baseline=%d true=%d false=%d diff=%d",
                 kind, param_name, baseline_len, t_len, f_len, diff,
@@ -529,9 +597,37 @@ class SQLiScanner(BaseModule):
                 continue
 
             if elapsed >= threshold:
+                # --- Differential-timing confirmation (false-positive guard) ---
+                # A real SLEEP(n) scales with n: re-test with 2x the delay and
+                # require the response time to grow proportionally.  A one-off
+                # network spike will not reproduce a second, proportional delay.
+                def _measure(d_seconds: float):
+                    sfx = template.format(delay=int(d_seconds))
+                    if append_mode:
+                        probe = self._append(params, param_name, sfx)
+                    else:
+                        probe = self._replace(params, param_name, sfx)
+                    t = time.perf_counter()
+                    r = self._send(url, method, probe)
+                    if r is None:
+                        return None
+                    return time.perf_counter() - t
+
+                confirmed, second_elapsed = confirm_time_based(
+                    _measure, float(delay_sec), elapsed, avg_baseline,
+                )
+                if not confirmed:
+                    logger.debug(
+                        "[SQLi/Time] %s=%r candidate NOT confirmed by 2x re-test "
+                        "(first=%.2fs second=%s) — skipping (FP guard)",
+                        param_name, display, elapsed,
+                        f"{second_elapsed:.2f}s" if second_elapsed is not None else "n/a",
+                    )
+                    continue
+
                 logger.debug(
-                    "[SQLi/Time] %s=%r elapsed=%.2fs baseline=%.2fs (%s)",
-                    param_name, display, elapsed, avg_baseline, dbms,
+                    "[SQLi/Time] %s=%r elapsed=%.2fs baseline=%.2fs confirmed@2x=%.2fs (%s)",
+                    param_name, display, elapsed, avg_baseline, second_elapsed, dbms,
                 )
                 curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
@@ -541,13 +637,16 @@ class SQLiScanner(BaseModule):
                     parameter=param_name,
                     payload=display,
                     evidence=(
-                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload "
+                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload, "
+                        f"confirmed at {2 * delay_sec}s sleep ({second_elapsed:.2f}s) "
                         f"(baseline avg={avg_baseline:.2f}s ±{std_baseline:.2f}s, DBMS: {dbms})"
                     ),
-                    confidence="medium",
+                    confidence="high",
                     details=(
                         f"Time-based blind SQLi ({dbms}): payload caused {elapsed:.2f}s "
-                        f"delay vs {avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples). "
+                        f"delay vs {avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples), "
+                        f"and a 2x-sleep re-test scaled to {second_elapsed:.2f}s "
+                        f"(differential-timing confirmed). "
                         "Remediation: use parameterised queries / prepared statements."
                     ),
                     reproduction=(
@@ -591,14 +690,33 @@ class SQLiScanner(BaseModule):
 
         field_base = param_name.split("__")[0]  # "title" from "title__icontains"
         baseline_len = len(baseline_text)
+        baseline_text_lower = baseline_text.lower()
 
-        # Threshold: response must be at least 20% larger OR 500 bytes more
-        # (whichever is bigger) to be considered a genuine data expansion
-        expand_threshold = max(500, int(baseline_len * 0.20))
+        # Adaptive threshold: pages with heavy static HTML (CSS/JS) have a large
+        # baseline that dwarfs small result-set expansions.  Use 10% for large
+        # pages (>8 KB) to catch cases where a few extra records add only ~1-2 KB.
+        pct = 0.10 if baseline_len > 8000 else 0.20
+        expand_threshold = max(300, int(baseline_len * pct))
+
+        # Pre-compile result-count patterns so we can detect numeric increases
+        # even when raw byte expansion is small (e.g. Django "Signals Found: N").
+        _COUNT_RE = re.compile(
+            r'(?:results?|found|signals?|records?|items?|posts?|count)[^\d]{0,20}(\d+)',
+            re.IGNORECASE,
+        )
+
+        def _baseline_count() -> Optional[int]:
+            m = _COUNT_RE.search(baseline_text)
+            return int(m.group(1)) if m else None
+
+        def _response_count(text: str) -> Optional[int]:
+            m = _COUNT_RE.search(text)
+            return int(m.group(1)) if m else None
 
         def _send_probe(probe_params: Dict) -> Optional[object]:
-            resp = self._send(url, method, probe_params)
-            return resp
+            return self._send(url, method, probe_params)
+
+        base_count = _baseline_count()
 
         # --- Probe group 1: permissive lookups that should return ALL records ---
         permissive_probes = [
@@ -617,10 +735,28 @@ class SQLiScanner(BaseModule):
                 continue
 
             expansion = len(resp.text) - baseline_len
-            if expansion >= expand_threshold:
+
+            # Accept the probe if EITHER the byte expansion is large enough
+            # OR the result count in the response is higher than baseline.
+            probe_count = _response_count(resp.text)
+            count_increase = (
+                probe_count is not None
+                and (base_count is None or probe_count > base_count)
+                and probe_count > 0
+            )
+
+            if expansion >= expand_threshold or count_increase:
+                if count_increase:
+                    signal = (
+                        f"result count {base_count} → {probe_count}"
+                        if base_count is not None
+                        else f"result count appeared ({probe_count})"
+                    )
+                else:
+                    signal = f"response expanded +{expansion} B ({baseline_len} → {len(resp.text)})"
                 logger.debug(
-                    "[SQLi/ORM] %s: probe %r expanded response by %d bytes",
-                    param_name, label, expansion,
+                    "[SQLi/ORM] %s: probe %r triggered (%s)",
+                    param_name, label, signal,
                 )
                 qs = "&".join(f"{k}={v}" for k, v in probe_params.items())
                 return Finding(
@@ -630,8 +766,7 @@ class SQLiScanner(BaseModule):
                     parameter=param_name,
                     payload=label,
                     evidence=(
-                        f"Response expanded {baseline_len} → {len(resp.text)} bytes "
-                        f"(+{expansion} B) with probe {label!r} — "
+                        f"Probe {label!r} triggered: {signal} — "
                         f"backend accepts arbitrary ORM lookups"
                     ),
                     confidence="high",

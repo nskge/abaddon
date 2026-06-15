@@ -214,6 +214,35 @@ class TestSQLiBooleanBased(unittest.TestCase):
 
         self.assertIsNone(finding, "Dynamic pages must not trigger boolean SQLi false positives")
 
+    def test_boolean_candidate_not_reproducible_rejected(self):
+        """A pattern that appears once but does not reproduce on re-test is discarded."""
+        resp_500 = _make_response("A" * 500)
+        resp_498 = _make_response("A" * 498)  # near baseline (TRUE)
+        resp_80 = _make_response("A" * 80)    # diverges (FALSE) -> looks like AND hit
+
+        scanner = self._scanner()
+        scanner._test_error_based = lambda *a, **kw: None
+
+        # 1-2: stable baselines; 3-4: first AND pair LOOKS like a hit;
+        # 5-6: re-confirmation returns baseline-sized pages (no signal) -> reject;
+        # everything after stays at baseline so no other pair hits.
+        seq = [resp_500, resp_500, resp_498, resp_80, resp_500, resp_500]
+
+        def get_side(*a, **kw):
+            return seq.pop(0) if seq else resp_500
+
+        scanner.http.get.side_effect = get_side
+
+        finding = scanner._test_boolean_based(
+            url="http://target.local/page",
+            method="GET",
+            params={"id": "1"},
+            param_name="id",
+        )
+        self.assertIsNone(
+            finding, "Boolean candidate that fails the re-test must not be flagged",
+        )
+
 
 class TestSQLiTimeBased(unittest.TestCase):
     """Time-based blind SQLi detection."""
@@ -227,10 +256,12 @@ class TestSQLiTimeBased(unittest.TestCase):
         scanner.http.get.return_value = _make_response("Normal page")
 
         # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        # + differential-timing confirmation at 2x sleep (must scale)
         times = iter([0.0, 0.1,   # baseline sample 1
                       0.0, 0.1,   # baseline sample 2
                       0.0, 0.1,   # baseline sample 3
-                      0.0, 3.5])  # payload start/end
+                      0.0, 3.5,   # payload start/end
+                      0.0, 7.0])  # 2x re-test scales proportionally -> confirmed
 
         with patch("scanner.modules.sqli.time.perf_counter", side_effect=times):
             finding = scanner._test_time_based(
@@ -259,16 +290,41 @@ class TestSQLiTimeBased(unittest.TestCase):
 
         self.assertIsNone(finding)
 
+    def test_single_spike_not_confirmed(self):
+        """A one-off latency spike that does NOT scale at 2x sleep is rejected (FP guard)."""
+        import itertools
+        scanner = self._scanner()  # delay_threshold = 2.0
+        scanner.http.get.return_value = _make_response("Normal page")
+
+        # baseline fast; first payload spikes (3.5s) but the 2x re-test stays
+        # fast (0.2s) → does not scale → must NOT be flagged.
+        times = itertools.chain(
+            [0.0, 0.1, 0.0, 0.1, 0.0, 0.1],  # 3 baselines
+            [0.0, 3.5],                       # payload 1 trips threshold
+            [0.0, 0.2],                       # 2x re-test fails to scale -> reject
+            itertools.cycle([0.0, 0.1]),      # every other payload stays fast
+        )
+        with patch("scanner.modules.sqli.time.perf_counter", side_effect=times):
+            finding = scanner._test_time_based(
+                url="http://target.local/page",
+                method="GET",
+                params={"id": "1"},
+                param_name="id",
+            )
+        self.assertIsNone(finding, "Non-scaling latency spike must not be flagged as SQLi")
+
     def test_append_mode_payload_shows_original_value(self):
         """Time-based append-mode payload displays the full injected value."""
         scanner = self._scanner()
         scanner.http.get.return_value = _make_response("Normal")
 
         # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        # + differential-timing confirmation at 2x sleep (must scale)
         times = iter([0.0, 0.05,  # baseline sample 1
                       0.0, 0.05,  # baseline sample 2
                       0.0, 0.05,  # baseline sample 3
-                      0.0, 3.0])  # first append payload triggers
+                      0.0, 3.0,   # first append payload triggers
+                      0.0, 6.0])  # 2x re-test scales proportionally -> confirmed
 
         with patch("scanner.modules.sqli.time.perf_counter", side_effect=times):
             finding = scanner._test_time_based(
@@ -295,13 +351,11 @@ class TestSQLiORMInjection(unittest.TestCase):
         # baseline: filtered results (~1KB)
         # probe with id__gte=0: all records (~10KB)
         baseline_resp = _make_response("A" * 1000)
-        expanded_resp = _make_response("A" * 12000)  # >20% expansion
+        expanded_resp = _make_response("A" * 12000)  # >10% expansion on large page
 
         call_count = [0]
         def _get(url, **kwargs):
             call_count[0] += 1
-            # First call (baseline in scan_parameter) → filtered size
-            # All probes that return expanded → id__gte=0 match
             return expanded_resp if call_count[0] > 1 else baseline_resp
         scanner.http.get.side_effect = _get
 
@@ -316,6 +370,33 @@ class TestSQLiORMInjection(unittest.TestCase):
         self.assertIsNotNone(finding)
         self.assertIn("ORM Injection", finding.vuln_type)
         self.assertEqual(finding.confidence, "high")
+
+    def test_orm_injection_detected_via_result_count(self):
+        """Detection via result-count increase works even with small byte expansion.
+
+        Pages with heavy static CSS/JS have a large baseline that dwarfs small
+        result-set additions.  The count-based signal catches this case.
+        """
+        scanner = self._scanner()
+        # Simulate a page with ~13KB of static HTML (nav/footer/CSS) + 0 results
+        static_html = "X" * 13000
+        baseline_body = static_html + "Signals Found: 0"
+        # Probe returns same static HTML + 8 results (+small expansion, but count rises)
+        probe_body = static_html + "Signals Found: 8" + "post-content " * 50
+
+        scanner.http.get.side_effect = [_make_response(probe_body)]
+
+        finding = scanner._test_orm_injection(
+            url="http://target.local/list",
+            method="GET",
+            params={"title__icontains": "notfound"},
+            param_name="title__icontains",
+            baseline_text=baseline_body,
+        )
+
+        self.assertIsNotNone(finding, "Must detect ORM injection via result-count signal")
+        self.assertIn("ORM Injection", finding.vuln_type)
+        self.assertIn("8", finding.evidence)  # count increase visible in evidence
 
     def test_orm_injection_skipped_for_plain_params(self):
         """Parameters without '__' are skipped — not Django ORM syntax."""

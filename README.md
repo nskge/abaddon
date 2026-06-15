@@ -9,7 +9,7 @@
 ```
 
 **Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.  
-Fast, accurate, and report-ready. — **v2.11.0**
+Fast, accurate, and report-ready. — **v2.12.0**
 
 > **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
 
@@ -41,6 +41,9 @@ Fast, accurate, and report-ready. — **v2.11.0**
 
 - **Recon phase** — DNS, IP, latency, server/tech fingerprint, CVE check before every scan
 - **Static target detection** — detects CDN/SPA targets (cache headers + response hash) and skips injection modules automatically to eliminate false positives
+- **Differential-timing confirmation** — blind time-based SQLi/CMDi candidates are re-tested at 2× the sleep and only reported when the delay scales proportionally, killing latency-spike false positives
+- **Boolean re-confirmation** — boolean-blind SQLi signals must reproduce on a second request before being reported (dynamic-page false-positive guard)
+- **Attack-path correlation** — BloodHound-style chaining composes confirmed findings into escalation paths (e.g. SQLi + weak JWT → account takeover, SSRF → cloud credential theft), shown on console and in JSON
 - **JS-aware crawl** — headless Chromium via Playwright; clicks modals/buttons (Register, Login, Cadastrar…), intercepts XHR/Fetch, finds inputs with no `name` attribute (`--js-crawl`)
 - **Subdomain takeover** — CNAME chain resolution → unclaimed-service fingerprint check (12 services)
 - **Port scanner** — concurrent TCP probe of 31 common ports with banner grab (`--port-scan`)
@@ -52,7 +55,7 @@ Fast, accurate, and report-ready. — **v2.11.0**
 - **Ctrl+C recovery** — graceful interrupt returns all findings collected so far
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
-- **285 unit tests**
+- **306 unit tests**
 
 ---
 

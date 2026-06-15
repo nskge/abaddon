@@ -177,10 +177,12 @@ class TestCMDiTimeBased(unittest.TestCase):
         scanner.http.get.return_value = _make_response("Normal")
 
         # 3 baseline samples (2 perf_counter calls each) + 1 payload call
+        # + differential-timing confirmation at 2x sleep (must scale)
         times = iter([0.0, 0.1,   # baseline sample 1
                       0.0, 0.1,   # baseline sample 2
                       0.0, 0.1,   # baseline sample 3
-                      0.0, 3.5])  # first payload triggers threshold
+                      0.0, 3.5,   # first payload triggers threshold
+                      0.0, 7.0])  # 2x re-test scales proportionally -> confirmed
 
         with patch("scanner.modules.cmdi.time.perf_counter", side_effect=times):
             finding = scanner._test_time_based(
@@ -193,6 +195,27 @@ class TestCMDiTimeBased(unittest.TestCase):
         self.assertIsNotNone(finding)
         self.assertIn("Command Injection", finding.vuln_type)
         self.assertIn("3.50", finding.evidence)
+
+    def test_single_spike_not_confirmed(self):
+        """One-off latency spike that doesn't scale at 2x sleep is rejected (FP guard)."""
+        import itertools
+        scanner = self._scanner()  # delay_threshold = 2.0
+        scanner.http.get.return_value = _make_response("Normal")
+
+        times = itertools.chain(
+            [0.0, 0.1, 0.0, 0.1, 0.0, 0.1],  # 3 baselines
+            [0.0, 3.5],                       # payload 1 trips threshold
+            [0.0, 0.2],                       # 2x re-test fails to scale -> reject
+            itertools.cycle([0.0, 0.1]),      # remaining payloads stay fast
+        )
+        with patch("scanner.modules.cmdi.time.perf_counter", side_effect=times):
+            finding = scanner._test_time_based(
+                url="http://target.local/ping",
+                method="GET",
+                params={"host": "127.0.0.1"},
+                param_name="host",
+            )
+        self.assertIsNone(finding, "Non-scaling spike must not be flagged as CMDi")
 
     def test_fast_response_no_finding(self):
         """Fast responses do not trigger."""

@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 import logging
 
 from .base import BaseModule, Finding
+from ..confirm import confirm_time_based
 from ..parser import build_curl_command, inject_into_params, rebuild_url_with_params
 
 logger = logging.getLogger("vulnscanner")
@@ -270,9 +271,35 @@ class CommandInjectionScanner(BaseModule):
 
             if elapsed >= threshold:
                 display = f"{params.get(param_name, '')}{suffix}"
+
+                # --- Differential-timing confirmation (false-positive guard) ---
+                # Re-test with 2x the sleep; a genuine injected sleep scales with
+                # the requested delay, a random network spike does not.
+                def _measure(d_seconds: float):
+                    sfx2 = template.format(delay=int(d_seconds))
+                    t = time.perf_counter()
+                    r = self._send(url, method, self._append(params, param_name, sfx2))
+                    if r is None:
+                        return None
+                    return time.perf_counter() - t
+
+                confirmed, second_elapsed = confirm_time_based(
+                    _measure, float(delay_sec), elapsed, avg_baseline,
+                )
+                if not confirmed:
+                    logger.debug(
+                        "[CMDi/Time] %s=%r candidate NOT confirmed by 2x re-test "
+                        "(first=%.2fs second=%s) — skipping (FP guard)",
+                        param_name, display, elapsed,
+                        f"{second_elapsed:.2f}s" if second_elapsed is not None else "n/a",
+                    )
+                    continue
+
                 logger.debug(
-                    "[CMDi/Time] %s=%r elapsed=%.2fs threshold=%.2fs (avg=%.2fs std=%.2fs %s)",
-                    param_name, display, elapsed, threshold, avg_baseline, std_baseline, os_hint,
+                    "[CMDi/Time] %s=%r elapsed=%.2fs threshold=%.2fs confirmed@2x=%.2fs "
+                    "(avg=%.2fs std=%.2fs %s)",
+                    param_name, display, elapsed, threshold, second_elapsed,
+                    avg_baseline, std_baseline, os_hint,
                 )
                 curl = build_curl_command(url, method, params, param_name, display)
                 return Finding(
@@ -282,14 +309,17 @@ class CommandInjectionScanner(BaseModule):
                     parameter=param_name,
                     payload=display,
                     evidence=(
-                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload "
+                        f"Response delayed {elapsed:.2f}s with {delay_sec}s sleep payload, "
+                        f"confirmed at {2 * delay_sec}s sleep ({second_elapsed:.2f}s) "
                         f"(baseline avg={avg_baseline:.2f}s ±{std_baseline:.2f}s, OS: {os_hint})"
                     ),
-                    confidence="medium",
+                    confidence="high",
                     details=(
                         f"Time-based command injection ({os_hint}). "
                         f"Payload caused {elapsed:.2f}s delay vs "
-                        f"{avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples). "
+                        f"{avg_baseline:.2f}s±{std_baseline:.2f}s baseline (3 samples), "
+                        f"and a 2x-sleep re-test scaled to {second_elapsed:.2f}s "
+                        f"(differential-timing confirmed). "
                         "Remediation: never pass user input to shell commands."
                     ),
                     reproduction=(

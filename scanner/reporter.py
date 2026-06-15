@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone
 from typing import List
 
+from .correlate import correlate_findings
 from .modules.base import Finding
 from . import __version__
 
@@ -180,6 +181,10 @@ class Reporter:
                         print(self._c(f"      {line}", DIM))
             print()
 
+        # Attack-path correlation (BloodHound-style) — composes confirmed
+        # findings into escalation chains. Printed before the closing summary.
+        self._print_attack_paths(findings)
+
         print(sep)
         summary_text = f"  {len(findings)} finding(s) -- review and validate before reporting."
         print(self._c(summary_text, BOLD))
@@ -192,6 +197,36 @@ class Reporter:
             else:
                 print(self._c(f"  Scan completed in {elapsed:.1f}s", DIM))
         print()
+
+    _PATH_SEV_COLOR = {"critical": RED, "high": RED, "medium": YELLOW}
+
+    def _print_attack_paths(self, findings: List[Finding]) -> None:
+        """Render correlated attack paths (chains of confirmed findings)."""
+        paths = correlate_findings(findings)
+        if not paths:
+            return
+
+        print()
+        print(self._c("  " + "=" * 52, BOLD))
+        print(self._c(f"  ATTACK PATHS ({len(paths)})", BOLD + MAGENTA))
+        print(self._c("  Confirmed findings chained into escalation paths", DIM))
+        print(self._c("  " + "=" * 52, BOLD))
+        print()
+
+        for idx, p in enumerate(paths, 1):
+            sev_c = self._PATH_SEV_COLOR.get(p.severity, WHITE)
+            host = f" @ {p.host}" if p.host else ""
+            print(self._c(f"  [{idx}] [{p.severity.upper()}] {p.name}{host}", BOLD + sev_c))
+            for i, step in enumerate(p.steps, 1):
+                connector = "    " if i == 1 else "  ->"
+                print(self._c(f"   {connector} {step}", CYAN))
+            print()
+            for sentence in p.narrative.split(". "):
+                sentence = sentence.strip().rstrip(".")
+                if sentence:
+                    print(self._c(f"      {sentence}.", DIM))
+            print(self._c(f"      > {p.recommendation}", GREEN))
+            print()
 
     def _field(self, label: str, value: str, color: str = "") -> None:
         """Print a single key-value field line."""
@@ -223,11 +258,13 @@ class Reporter:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     def _write_json(self, findings: List[Finding], path: str) -> None:
+        attack_paths = correlate_findings(findings)
         data = {
             "tool": f"OkrScann v{__version__}",
             "timestamp": self._ts(),
             "total": len(findings),
             "findings": [f.to_dict() for f in findings],
+            "attack_paths": [p.to_dict() for p in attack_paths],
         }
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, indent=2, ensure_ascii=False)
