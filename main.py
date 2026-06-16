@@ -227,6 +227,14 @@ Examples
 
 
 def main() -> int:
+    # No arguments → launch the interactive Abaddon menu.
+    if len(sys.argv) == 1:
+        try:
+            from abaddon.menu import run_menu
+            return run_menu()
+        except ImportError:
+            pass
+
     parser = _build_arg_parser()
     args = parser.parse_args()
 

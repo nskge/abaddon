@@ -143,7 +143,13 @@ def _print_findings(target, findings, sink, engine) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = parse_args(argv)
+    raw = argv if argv is not None else sys.argv[1:]
+    # No arguments → drop into the interactive menu.
+    if not raw:
+        from .menu import run_menu
+
+        return run_menu()
+    args = parse_args(raw)
     configure(args.verbose)
     console.print(f"[red]{_BANNER}[/red]")
     try:
