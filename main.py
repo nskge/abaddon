@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-OkrScann -- Web Vulnerability Scanner
+Abaddon -- Web Vulnerability Scanner
 ======================================
 Modular scanner for SQLi, XSS, LFI, CMDi, SSTI, CRLF, Open Redirects,
 and Security Header analysis.
@@ -26,8 +26,8 @@ from scanner.reporter import Reporter
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="okrscann",
-        description="OkrScann -- Modular web vulnerability scanner",
+        prog="abaddon",
+        description="Abaddon -- Modular web vulnerability scanner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples
@@ -56,7 +56,7 @@ Examples
     )
 
     parser.add_argument(
-        "--version", action="version", version=f"OkrScann v{__version__}",
+        "--version", action="version", version=f"Abaddon v{__version__}",
     )
 
     # ---- Target ----

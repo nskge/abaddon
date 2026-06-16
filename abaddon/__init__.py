@@ -1,4 +1,4 @@
-"""ABADDON — asynchronous offensive security engine for OkrScann.
+"""ABADDON — asynchronous offensive security engine.
 
 A high-concurrency, template-driven vulnerability detection core built on
 ``httpx.AsyncClient``. Designed for *authorized* security testing only:

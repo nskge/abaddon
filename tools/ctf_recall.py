@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure OkrScann's recall against the Lumen Store CTF ground truth.
+"""Measure Abaddon's recall against the Lumen Store CTF ground truth.
 
 Runs a single authenticated, orchestrated scan and maps the findings onto the
 9 intentional vulnerabilities listed in ``expected_findings.json``, then prints

@@ -1,4 +1,4 @@
-"""ASCII banner and visual branding for OkrScann."""
+"""ASCII banner and visual branding for Abaddon."""
 
 from scanner import __version__
 from scanner.cve_db import _CVE_DB
@@ -11,11 +11,11 @@ _MODULE_LIST = (
 
 # Hand-crafted logo -- ASCII-safe for all terminal encodings (Windows cp1252+)
 _LOGO = r"""
-     ____  _        ____
-    / __ \| | _____/ ___|  ___ __ _ _ __  _ __
-   | |  | | |/ / __\___ \ / __/ _` | '_ \| '_ \
-   | |__| |   <| |  ___) | (_| (_| | | | | | | |
-    \____/|_|\_\_| |____/ \___\__,_|_| |_|_| |_|
+    _    ____    _    ____  ____   ___  _   _
+   / \  | __ )  / \  |  _ \|  _ \ / _ \| \ | |
+  / _ \ |  _ \ / _ \ | | | | | | | | | |  \| |
+ / ___ \| |_) / ___ \| |_| | |_| | |_| | |\  |
+/_/   \_\____/_/   \_\____/|____/ \___/|_| \_|
 """
 
 _FRAME_WIDTH = 62

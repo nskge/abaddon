@@ -1,4 +1,4 @@
-# Open Redirect Payloads -- OkrScann reference list
+# Open Redirect Payloads -- Abaddon reference list
 # Usage: python main.py -u "..." --scan-type redirect --payloads payloads/redirect.txt
 #
 # Format: one payload per line.  Lines starting with # are ignored.

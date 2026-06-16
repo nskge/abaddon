@@ -1,4 +1,4 @@
-"""Output formatting and report generation for OkrScann."""
+"""Output formatting and report generation for Abaddon."""
 
 import json
 import sys
@@ -260,7 +260,7 @@ class Reporter:
     def _write_json(self, findings: List[Finding], path: str) -> None:
         attack_paths = correlate_findings(findings)
         data = {
-            "tool": f"OkrScann v{__version__}",
+            "tool": f"Abaddon v{__version__}",
             "timestamp": self._ts(),
             "total": len(findings),
             "findings": [f.to_dict() for f in findings],
@@ -271,7 +271,7 @@ class Reporter:
 
     def _write_txt(self, findings: List[Finding], path: str) -> None:
         lines = [
-            f"OkrScann v{__version__} -- Scan Report",
+            f"Abaddon v{__version__} -- Scan Report",
             f"Generated : {self._ts()}",
             f"Findings  : {len(findings)}",
             "=" * 60,

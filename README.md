@@ -1,15 +1,15 @@
-# OkrScann
+# Abaddon
 
 ```
-     ____  _        ____
-    / __ \| | _____/ ___|  ___ __ _ _ __  _ __
-   | |  | | |/ / __\___ \ / __/ _` | '_ \| '_ \
-   | |__| |   <| |  ___) | (_| (_| | | | | | | |
-    \____/|_|\_\_| |____/ \___\__,_|_| |_|_| |_|
+    _    ____    _    ____  ____   ___  _   _
+   / \  | __ )  / \  |  _ \|  _ \ / _ \| \ | |
+  / _ \ |  _ \ / _ \ | | | | | | | | | |  \| |
+ / ___ \| |_) / ___ \| |_| | |_| | |_| | |\  |
+/_/   \_\____/_/   \_\____/|____/ \___/|_| \_|
 ```
 
-**Modular web vulnerability scanner** built for penetration testers and bug bounty hunters.  
-Fast, accurate, and report-ready. — **v2.13.0**
+**Modular + async web vulnerability scanner** built for penetration testers and bug bounty hunters.  
+Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.13.0**
 
 > **Authorized targets ONLY.** The author assumes **no liability** for any misuse.
 
@@ -65,8 +65,8 @@ Fast, accurate, and report-ready. — **v2.13.0**
 ## Install
 
 ```bash
-git clone https://github.com/nskge/OkrScann.git
-cd OkrScann/vuln_scanner
+git clone https://github.com/nskge/abaddon.git
+cd abaddon/vuln_scanner
 pip install -r requirements.txt
 # JS-aware crawl (optional)
 pip install playwright && python -m playwright install chromium
@@ -75,7 +75,8 @@ pip install playwright && python -m playwright install chromium
 **Requires:** Python 3.10+
 
 ```bash
-python main.py --version   # OkrScann v2.10.0
+python main.py            # launch the interactive menu
+python main.py --version  # Abaddon v2.13.0
 ```
 
 ---
@@ -83,6 +84,13 @@ python main.py --version   # OkrScann v2.10.0
 ## Usage
 
 ```bash
+# Interactive menu (no arguments) — dark-purple TUI
+python main.py
+python -m abaddon
+
+# Async template engine (OAST, fuzzing, confidence correlation)
+python -m abaddon -u "http://target/" --scope "*.target.com"
+
 # Full scan on all modules
 python main.py -u "http://target/page?id=1"
 
@@ -286,7 +294,7 @@ requests:
 
 ## Disclaimer
 
-**OkrScann is for legal, authorized security testing only.**
+**Abaddon is for legal, authorized security testing only.**
 
 1. **Authorized use only.** Only test systems you own or have explicit written permission to test.
 2. **No liability.** Provided "as is" with no warranty. The author accepts no responsibility for damage or legal consequences from use or misuse.

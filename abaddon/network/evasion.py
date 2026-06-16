@@ -7,7 +7,7 @@ Two responsibilities:
   ACLs / rate limits are bypassable.
 * :class:`PayloadMutator` — encoding-chain transforms (URL, double-URL, unicode,
   case, SQL comment injection) across three escalating levels, mirroring the
-  existing OkrScann ``--waf-evasion`` ladder.
+  classic ``--waf-evasion`` ladder.
 
 This is standard control-validation tooling for engagements you are authorized
 to run — it does not defeat detection for malicious use.
