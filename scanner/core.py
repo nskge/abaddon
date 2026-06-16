@@ -805,7 +805,7 @@ class Scanner:
                                    r.headers.get("Content-Type", "application/javascript")))
 
         for f in scan_pages(pages):
-            key = (f.vuln_type, f.url, f.parameter, f.payload)
+            key = self._finding_key(f)
             if key not in self._seen_keys:
                 self._seen_keys.add(key)
                 self.findings.append(f)
@@ -824,9 +824,22 @@ class Scanner:
             or self.config.get("orchestrated")
         )
 
+    @staticmethod
+    def _finding_key(f: Finding):
+        """Dedup key for a finding.
+
+        Response-header issues (missing/weak headers, server banner) are a
+        property of the host, not of any single URL, so they collapse to one
+        finding per (type, host) — otherwise an authenticated crawl emits one
+        copy per page. Everything else keys on (type, url, param, payload).
+        """
+        if f.parameter == "(response headers)":
+            return (f.vuln_type, urlparse(f.url).netloc)
+        return (f.vuln_type, f.url, f.parameter, f.payload)
+
     def _add_finding(self, f: Finding) -> None:
         """Append *f* unless an identical finding was already recorded."""
-        key = (f.vuln_type, f.url, f.parameter, f.payload)
+        key = self._finding_key(f)
         if key not in self._seen_keys:
             self._seen_keys.add(key)
             self.findings.append(f)
@@ -936,8 +949,21 @@ class Scanner:
         return new_targets
 
     def _run_active_checks_phase(self, url: str) -> None:
-        """Build the ActiveContext and run every orchestrated check."""
+        """Build the ActiveContext and run every orchestrated check.
+
+        A local OAST listener is started for the duration so the blind /
+        second-order checks (e.g. stored XSS that only fires in an admin's
+        browser) can confirm out-of-band callbacks. It's torn down afterwards.
+        """
         from .active_checks import ActiveContext, run_active_checks
+
+        oast = None
+        try:
+            from .oast import OASTListener
+            oast = OASTListener(host=self.config.get("oast_host", "127.0.0.1")).start()
+        except Exception as exc:
+            logger.debug("OAST listener unavailable: %s", exc)
+
         parsed = urlparse(url)
         ctx = ActiveContext(
             base_url=f"{parsed.scheme}://{parsed.netloc}",
@@ -946,10 +972,15 @@ class Scanner:
             primary_cookies=self.config.get("cookies", {}),
             secondary_cookies=getattr(self, "_secondary_cookies", {}),
             auth=getattr(self, "_authenticator", None),
+            oast=oast,
             config=self.config,
         )
-        for f in run_active_checks(ctx):
-            self._add_finding(f)
+        try:
+            for f in run_active_checks(ctx):
+                self._add_finding(f)
+        finally:
+            if oast is not None:
+                oast.stop()
 
     def _build_targets(
         self, url, method, data_string, target_param,
@@ -1182,7 +1213,7 @@ class Scanner:
                         logger.debug("Module %s error: %s", mod_name, exc)
                         continue
                     for f in new_findings:
-                        key = (f.vuln_type, f.url, f.parameter, f.payload)
+                        key = self._finding_key(f)
                         if key in self._seen_keys:
                             continue
                         self._seen_keys.add(key)
@@ -1225,7 +1256,7 @@ class Scanner:
                     if fut.done() and not fut.cancelled():
                         try:
                             for f in fut.result():
-                                key = (f.vuln_type, f.url, f.parameter, f.payload)
+                                key = self._finding_key(f)
                                 if key not in self._seen_keys:
                                     self._seen_keys.add(key)
                                     self.findings.append(f)

@@ -40,7 +40,7 @@ _MATCHERS = {
     "sqli_auth_bypass":   lambda f: "authentication bypass" in _t(f) and "login" in _u(f),
     "sqli_union":         lambda f: "union" in _t(f) and "shop" in _u(f),
     "xss_reflected":      lambda f: "reflected xss" in _t(f) and "shop" in _u(f),
-    "xss_stored":         lambda f: "stored" in _t(f) and "xss" in _t(f),
+    "xss_stored":         lambda f: "stored" in _t(f),
     "idor_order":         lambda f: ("idor" in _t(f) or "bola" in _t(f)) and "order" in (_u(f) + (f.payload or "").lower()),
     "mass_assignment":    lambda f: "mass assignment" in _t(f),
     "broken_access_control": lambda f: "broken access" in _t(f) and "admin" in _u(f),

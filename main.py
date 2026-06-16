@@ -150,6 +150,35 @@ Examples
         help="Minimum delay between requests when rate limiting is on  (default: 0.0)",
     )
 
+    # ---- Authenticated / orchestrated scanning ----
+    au = parser.add_argument_group("Authenticated scan")
+    au.add_argument(
+        "--auth-user", metavar="USER",
+        help=(
+            "Username for authenticated scanning. Logs in once and reuses the "
+            "session for the crawl, every module, and the orchestrated checks "
+            "(auth-bypass, broken access, mass assignment, stored XSS, BOLA, CSRF). "
+            "Enabling this turns on orchestrated mode."
+        ),
+    )
+    au.add_argument("--auth-pass", metavar="PASS", help="Password for --auth-user.")
+    au.add_argument(
+        "--login-url", metavar="URL", default="/login",
+        help="Login form URL (absolute or path).  (default: /login)",
+    )
+    au.add_argument(
+        "--auth-user2", metavar="USER",
+        help="Second identity (username) — enables two-user BOLA/IDOR confirmation.",
+    )
+    au.add_argument("--auth-pass2", metavar="PASS", help="Password for --auth-user2.")
+    au.add_argument(
+        "--orchestrated", action="store_true",
+        help=(
+            "Run the authenticated crawl + orchestrated checks without credentials "
+            "(anonymous orchestrated scan). Implied by --auth-user."
+        ),
+    )
+
     # ---- Bug bounty ----
     bb = parser.add_argument_group("Bug bounty")
     bb.add_argument(
@@ -262,6 +291,13 @@ def main() -> int:
         "js_crawl": getattr(args, "js_crawl", False),
         "custom_payloads": args.payloads,
         "delay_threshold": args.delay,
+        # Authenticated / orchestrated scanning
+        "auth_username": args.auth_user,
+        "auth_password": args.auth_pass,
+        "auth_login_url": args.login_url,
+        "auth_username2": args.auth_user2,
+        "auth_password2": args.auth_pass2,
+        "orchestrated": args.orchestrated or bool(args.auth_user),
         "headers": headers,
         "cookies": cookies,
         "proxy": args.proxy,

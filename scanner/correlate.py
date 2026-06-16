@@ -287,8 +287,42 @@ def _chain_rce_cve(v: _HostView) -> Optional[AttackPath]:
     return None
 
 
+def _chain_idor_massassign(v: _HostView) -> Optional[AttackPath]:
+    """IDOR/BOLA + mass assignment on the same host → full account takeover.
+
+    Each is serious alone, but together they compound: mass assignment lets an
+    attacker elevate their OWN account (grant admin/credit), while BOLA lets them
+    read or act on OTHER users' objects. Chained, an attacker self-promotes and
+    then operates across every account — the classic path to total takeover.
+    """
+    idor = v.first("idor") or v.first("bola")
+    massa = v.first("mass assignment")
+    if idor and massa:
+        return AttackPath(
+            name="Account takeover: self-escalation + cross-account access",
+            severity="critical",
+            steps=[
+                f"Mass assignment ({massa.parameter}) — elevate own privileges",
+                f"IDOR/BOLA ({idor.url}) — read/act on other users' objects",
+            ],
+            narrative=(
+                "Mass assignment lets the attacker grant their own account "
+                "privileges the server should control (admin / tier / credit). "
+                "Broken object-level authorization then lets that account reach "
+                "every other user's data and actions. Combined, a normal user "
+                "becomes an admin operating across all accounts."
+            ),
+            recommendation=(
+                "Bind only allow-listed fields on profile updates AND enforce a "
+                "per-object ownership check on every object access."
+            ),
+        )
+    return None
+
+
 _RULES: List[Callable[[_HostView], Optional[AttackPath]]] = [
     _chain_sqli_jwt,
+    _chain_idor_massassign,
     _chain_lfi_rce,
     _chain_ssrf_cloud,
     _chain_open_redirect_token,

