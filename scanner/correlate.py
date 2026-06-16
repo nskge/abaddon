@@ -206,34 +206,64 @@ def _chain_open_redirect_token(v: _HostView) -> Optional[AttackPath]:
 
 
 def _chain_xss_session(v: _HostView) -> Optional[AttackPath]:
+    """XSS → session hijack — but only assert the *real* containment gap.
+
+    The previous version hard-coded "no CSP / no HttpOnly" in the narrative even
+    when a CSP was present, which is a false statement in the report. Instead we
+    derive the actual state from the sibling findings that the header/secret
+    modules already produced:
+      • CSP absent  -> a "Missing Security Header: Content-Security-Policy" finding
+      • CSP weak    -> a "Weak Content-Security-Policy" finding
+      • cookie risk -> a finding noting a non-HttpOnly session cookie
+    We only build the chain when at least one of these containment gaps is real,
+    and we phrase it according to which gap actually exists.
+    """
     xss = v.first("cross-site scripting") or v.first("xss")
     if not xss:
         return None
+
     blob = v.evidence_blob()
-    weak_cookie = any(k in blob for k in (
-        "httponly", "content-security-policy", "missing csp", "csp",
+    csp_absent = bool(v.all("missing", "content-security-policy")) \
+        or "no content-security-policy" in blob or "no csp" in blob
+    csp_weak = bool(v.all("weak", "content-security-policy")) or "weak csp" in blob
+    # Only treat the cookie as a gap on an explicit NEGATIVE phrasing — never on
+    # bare "httponly" (which also appears in remediation advice like "set HttpOnly").
+    cookie_no_httponly = any(p in blob for p in (
+        "without httponly", "no httponly", "not httponly",
+        "lacks httponly", "non-httponly", "missing httponly",
     ))
-    header_finding = v.any("missing security", "header", "cookie")
-    if weak_cookie or header_finding:
-        return AttackPath(
-            name="Reflected XSS to session hijack",
-            severity="high",
-            steps=[
-                f"Reflected XSS on param {xss.parameter!r}",
-                "Cookies lack HttpOnly / no Content-Security-Policy to contain it",
-            ],
-            narrative=(
-                "The reflected XSS executes attacker JavaScript in the victim's "
-                "session. Because session cookies are not HttpOnly (or no CSP "
-                "constrains script), the payload can exfiltrate document.cookie "
-                "and hijack the session directly."
-            ),
-            recommendation=(
-                "Output-encode reflected values, set HttpOnly+Secure+SameSite on "
-                "session cookies, and deploy a strict Content-Security-Policy."
-            ),
-        )
-    return None
+
+    # No demonstrated containment gap → don't claim one. (A strong CSP + HttpOnly
+    # cookie would actually mitigate the XSS, so asserting a hijack path would be
+    # wrong.)
+    if not (csp_absent or csp_weak or cookie_no_httponly):
+        return None
+
+    if csp_absent:
+        csp_step = "no Content-Security-Policy is set to contain injected script"
+    elif csp_weak:
+        csp_step = "the Content-Security-Policy is weak (e.g. script-src 'unsafe-inline'), so inline script still runs"
+    else:
+        csp_step = "the session cookie is not HttpOnly, so document.cookie is readable from script"
+
+    return AttackPath(
+        name="Reflected XSS to session hijack",
+        severity="high",
+        steps=[
+            f"Reflected XSS on param {xss.parameter!r}",
+            csp_step,
+        ],
+        narrative=(
+            "The reflected XSS executes attacker JavaScript in the victim's "
+            f"session, and {csp_step}. The payload can therefore steal the "
+            "session (or act in the victim's name) rather than being contained."
+        ),
+        recommendation=(
+            "Output-encode reflected values, set HttpOnly+Secure+SameSite on "
+            "session cookies, and deploy a strict Content-Security-Policy "
+            "(no 'unsafe-inline', no wildcard sources)."
+        ),
+    )
 
 
 def _chain_rce_cve(v: _HostView) -> Optional[AttackPath]:

@@ -17,6 +17,59 @@ def _make_response(text: str, status: int = 200):
     return resp
 
 
+def _q(url: str) -> str:
+    from urllib.parse import urlparse, parse_qs
+    return parse_qs(urlparse(url).query).get("q", [""])[0]
+
+
+class TestXSSHtmlInjection(unittest.TestCase):
+    """Phase 3 fallback: HTML injection when script execution is filtered."""
+
+    def _scanner(self):
+        return XSSScanner(MagicMock(), {})
+
+    def test_html_injection_when_script_filtered(self):
+        """App allows harmless formatting tags but encodes everything else
+        (a typical sanitiser) → HTML Injection, not full XSS."""
+        import re
+        scanner = self._scanner()
+        _allowed = re.compile(r"^</?(?:u|b|i|em|strong|h1|p|marquee)>$", re.I)
+
+        def get_side(url):
+            v = _q(url)
+            tags = re.findall(r"</?[a-zA-Z][^>]*>", v)
+            if tags and not all(_allowed.match(t) for t in tags):
+                # contains a disallowed tag -> sanitiser encodes the whole value
+                v = v.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            return _make_response(f"<div>You searched: {v}</div>")
+
+        scanner.http.get.side_effect = get_side
+        findings = scanner.scan_parameter("http://t.local/shop", "GET", {"q": "x"}, "q")
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].vuln_type, "HTML Injection")
+        self.assertEqual(findings[0].confidence, "medium")
+
+    def test_full_xss_takes_priority_over_html_injection(self):
+        """When script reflects raw, the finding is full XSS, not HTML injection."""
+        scanner = self._scanner()
+        scanner.http.get.side_effect = lambda url: _make_response(f"<div>{_q(url)}</div>")
+        findings = scanner.scan_parameter("http://t.local/shop", "GET", {"q": "x"}, "q")
+        self.assertEqual(len(findings), 1)
+        self.assertIn("Reflected XSS", findings[0].vuln_type)
+
+    def test_no_html_injection_when_everything_encoded(self):
+        """A safe app that encodes all output yields no finding."""
+        scanner = self._scanner()
+
+        def get_side(url):
+            v = _q(url).replace("<", "&lt;").replace(">", "&gt;")
+            return _make_response(f"<div>{v}</div>")
+
+        scanner.http.get.side_effect = get_side
+        findings = scanner.scan_parameter("http://t.local/shop", "GET", {"q": "x"}, "q")
+        self.assertEqual(findings, [])
+
+
 class TestXSSReflectionProbe(unittest.TestCase):
     """Phase 1: reflection probe."""
 

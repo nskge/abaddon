@@ -244,6 +244,86 @@ class TestSQLiBooleanBased(unittest.TestCase):
         )
 
 
+class TestSQLiUnionBased(unittest.TestCase):
+    """UNION-based in-band extraction — the 'solid proof' path."""
+
+    def _scanner(self):
+        return SQLiScanner(MagicMock(), {"delay_threshold": 5.0})
+
+    @staticmethod
+    def _q(url):
+        from urllib.parse import urlparse, parse_qs
+        return parse_qs(urlparse(url).query).get("q", [""])[0]
+
+    def test_union_confirmed_with_extraction(self):
+        """A DB that executes UNION (concatenates markers) is confirmed, and real
+        data is extracted between the markers."""
+        scanner = self._scanner()
+
+        def get_side(url):
+            import re
+            q = self._q(url)
+            body = "<html>shop results</html>"
+            # Extraction form: 'T1'||(EXPR)||'T2'  -> return loot between markers.
+            me = re.search(r"'(\w+)'\|\|\(.+?\)\|\|'(\w+)'", q)
+            if me and "UNION" in q.upper():
+                return _make_response(body + f"<i>{me.group(1)}users,coupons,orders{me.group(2)}</i>")
+            # Plain computed marker 'T1'||'T2' -> DB joins them (execution proof).
+            mp = re.search(r"'(\w+)'\|\|'(\w+)'", q)
+            if mp and "UNION" in q.upper():
+                return _make_response(body + f"<i>{mp.group(1)}{mp.group(2)}</i>")
+            # Injectability gate: a lone quote breaks SQL -> error.
+            if q.count("'") % 2 == 1:
+                return _make_response("SQL error", 500)
+            return _make_response(body)
+
+        scanner.http.get.side_effect = get_side
+        finding = scanner._test_union_based(
+            "http://t.local/shop", "GET", {"q": "widget"}, "q", baseline_text="<html>shop results</html>",
+        )
+        self.assertIsNotNone(finding)
+        self.assertIn("UNION-based", finding.vuln_type)
+        self.assertEqual(finding.confidence, "high")
+        self.assertIn("users,coupons,orders", finding.evidence)
+
+    def test_union_no_false_positive_on_pure_reflection(self):
+        """A search box that merely reflects the payload (never executes it) must
+        NOT be flagged — the computed marker never gets joined."""
+        scanner = self._scanner()
+        # Reflects q verbatim, never errors, never concatenates.
+        scanner.http.get.side_effect = lambda url: _make_response(f"<div>{self._q(url)}</div>")
+        finding = scanner._test_union_based(
+            "http://t.local/shop", "GET", {"q": "widget"}, "q", baseline_text="<div>widget</div>",
+        )
+        self.assertIsNone(finding)
+
+    def test_union_no_fp_when_quote_errors_but_no_execution(self):
+        """Gate passes (quote breaks the page) but UNION never executes (e.g. WAF
+        strips it) → still no finding, because the joined marker never appears."""
+        scanner = self._scanner()
+
+        def get_side(url):
+            q = self._q(url)
+            if q.count("'") % 2 == 1:
+                return _make_response("SQL error", 500)   # gate sees a difference
+            return _make_response(f"<div>{q}</div>")        # reflects, never joins
+
+        scanner.http.get.side_effect = get_side
+        finding = scanner._test_union_based(
+            "http://t.local/shop", "GET", {"q": "widget"}, "q", baseline_text="<div>widget</div>",
+        )
+        self.assertIsNone(finding)
+
+    def test_visible_diff_sample_finds_appearing_content(self):
+        """The boolean concrete-evidence helper returns a line present in TRUE but
+        absent in FALSE."""
+        true_html = "<ul><li>Aurora Desk Lamp</li><li>Terra Mug</li></ul>"
+        false_html = "<ul></ul>"
+        sample = SQLiScanner._visible_diff_sample(true_html, false_html)
+        self.assertIsNotNone(sample)
+        self.assertIn("Aurora Desk Lamp", sample)
+
+
 class TestSQLiTimeBased(unittest.TestCase):
     """Time-based blind SQLi detection."""
 

@@ -181,7 +181,69 @@ class HeaderScanner(BaseModule):
                 ),
             ))
 
+        # CSP present but WEAK. A header being present isn't enough — a policy
+        # that allows 'unsafe-inline' script or wildcard sources doesn't actually
+        # stop XSS. Report this as its own finding (medium), separate from the
+        # "missing CSP" case, so a reflected-XSS that fires *despite* a CSP is
+        # explained rather than looking contradictory.
+        weak = self._weak_csp_reasons(csp_value)
+        if csp_value and weak:
+            findings.append(Finding(
+                vuln_type="Weak Content-Security-Policy",
+                url=url,
+                method="GET",
+                parameter="(response headers)",
+                payload="N/A",
+                evidence=f"CSP present but permissive: {', '.join(weak)} — policy: {csp_value[:120]}",
+                confidence="medium",
+                details=(
+                    "A Content-Security-Policy is set but does not meaningfully "
+                    f"constrain script execution ({'; '.join(weak)}). With "
+                    "'unsafe-inline' or wildcard sources, injected inline scripts "
+                    "still run, so the CSP provides little protection against XSS. "
+                    "Remediation: remove 'unsafe-inline'/'unsafe-eval', avoid '*' "
+                    "in script/default-src, and use nonces or hashes for inline scripts."
+                ),
+                reproduction=(
+                    f"# 1. Read the CSP header:\n"
+                    f"$ curl -s -k -I \"{url}\" | grep -i content-security-policy\n"
+                    f"# 2. Look for 'unsafe-inline' / 'unsafe-eval' / '*' in script-src\n"
+                    f"#    or default-src — these let injected inline script execute.\n"
+                    f"# 3. An XSS payload like <script>alert(1)</script> still fires."
+                ),
+            ))
+
         return findings
+
+    @staticmethod
+    def _weak_csp_reasons(csp: str):
+        """Return the list of reasons a CSP is too permissive to stop XSS, or []."""
+        if not csp:
+            return []
+        low = csp.lower()
+        reasons = []
+        # Pull the directive that governs scripts (script-src, else default-src).
+        directives = {}
+        for part in low.split(";"):
+            part = part.strip()
+            if not part:
+                continue
+            name, _, val = part.partition(" ")
+            directives[name.strip()] = val.strip()
+        script_policy = directives.get("script-src", directives.get("default-src", ""))
+        if "'unsafe-inline'" in script_policy:
+            reasons.append("script-src allows 'unsafe-inline'")
+        if "'unsafe-eval'" in script_policy:
+            reasons.append("script-src allows 'unsafe-eval'")
+        # Bare wildcard host source (not the safe 'self'); ignore data: scheme etc.
+        for tok in script_policy.split():
+            if tok == "*" or tok.endswith("://*") or tok == "http:" or tok == "https:":
+                reasons.append(f"script source is wildcard ({tok})")
+                break
+        # default-src * with no script-src override leaves scripts wide open.
+        if "script-src" not in directives and directives.get("default-src", "") .strip() in ("*", "http:", "https:"):
+            reasons.append("default-src is a wildcard with no script-src")
+        return reasons
 
     # ------------------------------------------------------------------
     # Information disclosure

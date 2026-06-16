@@ -75,6 +75,14 @@ _RESET = "\033[0m"
 # Default parallel module threads per parameter (overridden by --threads)
 _DEFAULT_WORKERS = 4
 
+# REST-style ID path segments (numeric or UUID), e.g. /api/orders/2 or
+# /users/<uuid>. Used to synthesize an IDOR target when a path-only URL has no
+# query/POST params (otherwise the IDOR module never runs on it).
+_ID_PATH_SEG_RE = re.compile(
+    r"/(?:\d{1,15}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})(?:/|$)"
+)
+
 # ---------------------------------------------------------------------------
 # Technology fingerprints (header + body patterns)
 # ---------------------------------------------------------------------------
@@ -200,7 +208,36 @@ class Scanner:
                 ))
                 print()
 
+            # Passive secret scan over the page + its same-origin JS bundles.
+            # Runs on full scans regardless of injectable params being present.
+            if baseline_resp is not None and self.config.get("scan_type", "all") == "all":
+                self._passive_secret_scan(url, baseline_resp)
+
+            # Authenticated session (opt-in): log in once so every subsequent
+            # request — crawl, per-param modules, orchestrated checks — runs with
+            # a real session. This is the single biggest unlock for recall, since
+            # most interesting endpoints live behind login.
+            self._crawl_result = None
+            if self._orchestrated_enabled():
+                self._authenticate()
+
             targets = self._build_targets(url, method, data_string, target_param)
+
+            # App crawl (opt-in): walk the authenticated surface. The crawl result
+            # always feeds the orchestrated checks; whether the newly-discovered
+            # query targets are *also* run through the full per-param module
+            # battery is controlled by ``crawl_scan_targets`` (default on). Turn it
+            # off when you only want the orchestrated checks + the seed scanned
+            # (much faster, e.g. for recall measurement).
+            if self._orchestrated_enabled():
+                crawl_targets = self._orchestrated_crawl(url, target_param)
+                if self.config.get("crawl_scan_targets", True):
+                    existing = {(t["url"], t["method"], t["param_name"]) for t in targets}
+                    for ct in crawl_targets:
+                        key = (ct["url"], ct["method"], ct["param_name"])
+                        if key not in existing:
+                            existing.add(key)
+                            targets.append(ct)
 
             if (not targets or crawl) and baseline_resp is not None:
                 form_targets = self._crawl_forms(url, baseline_resp, target_param)
@@ -239,6 +276,13 @@ class Scanner:
 
             for target in targets:
                 self._scan_target(target)
+
+            # Orchestrated, session-aware checks (auth-bypass, broken access,
+            # mass assignment, stored XSS, BOLA, CSRF). They need the crawl
+            # surface + (optionally) two identities, so they run after the
+            # per-param loop and merge their findings with dedup.
+            if self._orchestrated_enabled() and self._crawl_result is not None:
+                self._run_active_checks_phase(url)
 
         except KeyboardInterrupt:
             self._interrupted = True
@@ -727,6 +771,186 @@ class Scanner:
 
         return False
 
+    def _passive_secret_scan(self, url: str, baseline_resp) -> None:
+        """Scan the page body + its same-origin <script src> bundles for secrets.
+
+        Free of injection false positives (purely passive). Decoding of
+        base64 / atob() wrapped values is handled inside scanner.secrets.
+        """
+        from urllib.parse import urljoin
+        from .secrets import scan_pages
+
+        class _Page:
+            __slots__ = ("url", "body", "content_type")
+            def __init__(self, u, b, c):
+                self.url, self.body, self.content_type = u, b, c
+
+        pages = [_Page(url, baseline_resp.text,
+                       baseline_resp.headers.get("Content-Type", "text/html"))]
+
+        target_host = urlparse(url).hostname or ""
+        seen_src = set()
+        for m in re.finditer(r'<script[^>]+src=["\']([^"\']+)["\']',
+                             baseline_resp.text, re.IGNORECASE):
+            src = urljoin(url, m.group(1))
+            if src in seen_src or (urlparse(src).hostname or "") != target_host:
+                continue
+            seen_src.add(src)
+            try:
+                r = self.http.get(src)
+            except Exception:
+                r = None
+            if r is not None:
+                pages.append(_Page(src, r.text,
+                                   r.headers.get("Content-Type", "application/javascript")))
+
+        for f in scan_pages(pages):
+            key = (f.vuln_type, f.url, f.parameter, f.payload)
+            if key not in self._seen_keys:
+                self._seen_keys.add(key)
+                self.findings.append(f)
+
+    # ------------------------------------------------------------------
+    # Orchestrated (authenticated, crawl-aware) phase
+    # ------------------------------------------------------------------
+
+    def _orchestrated_enabled(self) -> bool:
+        """The heavy authenticated phase (login + app crawl + orchestrated
+        checks) only runs when explicitly requested — either auth credentials
+        were supplied or config['orchestrated'] is set — so default scans keep
+        their existing behaviour and cost."""
+        return bool(
+            self.config.get("auth_username")
+            or self.config.get("orchestrated")
+        )
+
+    def _add_finding(self, f: Finding) -> None:
+        """Append *f* unless an identical finding was already recorded."""
+        key = (f.vuln_type, f.url, f.parameter, f.payload)
+        if key not in self._seen_keys:
+            self._seen_keys.add(key)
+            self.findings.append(f)
+
+    def _make_client(self, cookies: Dict) -> HTTPClient:
+        """Factory used by the crawler and orchestrated checks to build clients
+        carrying a chosen identity's cookies (or none, for anonymous probes)."""
+        return HTTPClient(
+            headers=self.config.get("headers", {}),
+            cookies=cookies or {},
+            proxy=self.config.get("proxy"),
+            timeout=self.config.get("timeout", 10),
+            follow_redirects=self.config.get("follow_redirects", True),
+            rate_limiter=self._rate_limiter,
+        )
+
+    def _authenticate(self) -> None:
+        """Log in with the configured credentials and reuse the session cookie
+        everywhere (config["cookies"] + self.http). A second credential, if
+        given, is captured separately for two-identity BOLA testing."""
+        from urllib.parse import urljoin
+        from .auth import Authenticator, Credential
+
+        self._authenticator = None
+        self._secondary_cookies: Dict = {}
+
+        user = self.config.get("auth_username")
+        pw = self.config.get("auth_password") or ""
+        login_url = self.config.get("auth_login_url") or "/login"
+        if not user:
+            return
+        login_abs = login_url if login_url.startswith("http") else urljoin(self.config["url"], login_url)
+
+        creds = [Credential(user, pw)]
+        u2, p2 = self.config.get("auth_username2"), self.config.get("auth_password2")
+        if u2:
+            creds.append(Credential(u2, p2 or ""))
+
+        auth = Authenticator(
+            login_abs, creds,
+            timeout=self.config.get("timeout", 10),
+            proxy=self.config.get("proxy"),
+            extra_headers=self.config.get("headers"),
+        )
+        cookies = auth.login()
+        self._authenticator = auth
+        if len(creds) > 1:
+            self._secondary_cookies = auth.session_cookies_for(1)
+
+        if cookies:
+            self.config["cookies"] = {**self.config.get("cookies", {}), **cookies}
+            try:
+                self.http._session.cookies.update(cookies)
+            except Exception:
+                pass
+            logger.info("Authenticated as %r — session reused for the whole scan.", user)
+            if not self.config.get("quiet"):
+                print(self._c(f"   [+] Authenticated as {user!r} — scanning with a live session", _GREEN))
+        else:
+            logger.warning("Authentication failed for %r — continuing unauthenticated.", user)
+
+    def _orchestrated_crawl(self, url: str, target_param) -> List[Dict]:
+        """Crawl the authenticated surface; return new injectable targets and
+        stash the full CrawlResult for the orchestrated checks. Also runs the
+        passive secret scan over every crawled page/asset."""
+        from .crawler import crawl
+        client = self._make_client(self.config.get("cookies", {}))
+        try:
+            result = crawl(
+                url, client,
+                max_pages=self.config.get("crawl_max_pages", 60),
+                max_depth=self.config.get("crawl_max_depth", 3),
+            )
+        except Exception as exc:
+            logger.debug("Orchestrated crawl failed: %s", exc)
+            self._crawl_result = None
+            return []
+
+        self._crawl_result = result
+        if not self.config.get("quiet"):
+            print(self._c(
+                f"   [+] Crawl: {len(result.pages)} page(s), {len(result.targets)} target(s), "
+                f"{len(result.forms)} form(s)", _CYAN,
+            ))
+
+        # Secret scan across everything the crawler fetched (catches /static/*.js).
+        try:
+            from .secrets import scan_pages
+            for f in scan_pages(result.pages):
+                self._add_finding(f)
+        except Exception as exc:
+            logger.debug("Crawl secret scan failed: %s", exc)
+
+        # Don't pour the full per-param module battery onto auth endpoints:
+        # fuzzing /register creates junk accounts, /login churns sessions, and
+        # the orchestrated auth-bypass check already covers login forms. This
+        # keeps the scan fast and side-effect-free.
+        _SKIP_PATHS = ("/login", "/register", "/signup", "/logout", "/signin")
+        new_targets = []
+        for t in result.targets:
+            if target_param and t["param_name"] != target_param:
+                continue
+            path = urlparse(t["url"]).path.lower()
+            if any(s in path for s in _SKIP_PATHS):
+                continue
+            new_targets.append(t)
+        return new_targets
+
+    def _run_active_checks_phase(self, url: str) -> None:
+        """Build the ActiveContext and run every orchestrated check."""
+        from .active_checks import ActiveContext, run_active_checks
+        parsed = urlparse(url)
+        ctx = ActiveContext(
+            base_url=f"{parsed.scheme}://{parsed.netloc}",
+            crawl=self._crawl_result,
+            make_client=self._make_client,
+            primary_cookies=self.config.get("cookies", {}),
+            secondary_cookies=getattr(self, "_secondary_cookies", {}),
+            auth=getattr(self, "_authenticator", None),
+            config=self.config,
+        )
+        for f in run_active_checks(ctx):
+            self._add_finding(f)
+
     def _build_targets(
         self, url, method, data_string, target_param,
     ) -> List[Dict]:
@@ -752,6 +976,20 @@ class Scanner:
                 targets.append(
                     {"url": url, "method": "POST", "params": params, "param_name": name}
                 )
+
+        # Path-based IDOR: REST URLs like /api/orders/2 carry the object id in the
+        # path, not a query/POST param — so without this no target is built and the
+        # (capable) IDOR module never runs. Synthesize one path-only target; it is
+        # restricted to the IDOR module in _scan_target to avoid spurious injections.
+        if not targets and _ID_PATH_SEG_RE.search(urlparse(url).path):
+            base = get_base_url(url)
+            targets.append({
+                "url": base,
+                "method": method,
+                "params": parse_post_data(data_string) if method == "POST" else {},
+                "param_name": "(path id)",
+                "path_only": True,
+            })
 
         return targets
 
@@ -920,6 +1158,11 @@ class Scanner:
         if static and len(active_classes) < len(self.module_classes):
             skipped = [cls.NAME for cls in self.module_classes if cls not in active_classes]
             logger.debug("Static target: skipping injection modules %s", skipped)
+
+        # Synthetic path-only targets exist solely to drive path-based IDOR;
+        # don't fuzz the placeholder param with the other modules.
+        if target.get("path_only"):
+            active_classes = [cls for cls in active_classes if cls.NAME == "idor"]
 
         max_workers = self.config.get("threads", _DEFAULT_WORKERS)
         with ThreadPoolExecutor(max_workers=max_workers) as pool:

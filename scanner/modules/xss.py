@@ -20,6 +20,15 @@ from ..parser import build_curl_command, inject_into_params, rebuild_url_with_pa
 
 logger = logging.getLogger("vulnscanner")
 
+
+def _html_escape(s: str) -> str:
+    """Show what a SAFE site would return (so the user can compare side by side)."""
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;")
+        .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Payload library
 # ---------------------------------------------------------------------------
@@ -38,14 +47,28 @@ _PAYLOADS_HTML = [
     '<a href=javascript:alert(1)>x</a>',
 ]
 
+# Attribute-context payloads.
+# When user input lands inside an attribute value (e.g. <input value="HERE">),
+# the strongest proof is to BREAK OUT of the attribute+tag and inject a fresh
+# element that runs script *on its own*, with zero user interaction:
+#   "> closes the value and the tag, then <script>/<img onerror>/<svg onload> run.
+# Old payloads like `" onmouseover="alert(1)` only fire if the victim happens to
+# hover the element — weak, often unprovable. These fire automatically.
 _PAYLOADS_ATTR = [
-    '" onmouseover="alert(1)',
-    "' onmouseover='alert(1)",
-    '" onfocus="alert(1)" autofocus="',
-    "' onfocus='alert(1)' autofocus='",
-    '" onblur="alert(1)',
-    '" onclick="alert(1)',
-    '" onerror="alert(1)',
+    # Double-quoted attribute breakout (most common: value="...")
+    '"><script>alert(1)</script>',
+    '"><img src=x onerror=alert(1)>',
+    '"><svg onload=alert(1)>',
+    # Single-quoted attribute breakout (value='...')
+    "'><script>alert(1)</script>",
+    "'><img src=x onerror=alert(1)>",
+    # Breakout that auto-fires WITHOUT any user interaction (autofocus->onfocus).
+    # Note: every attribute payload INCLUDES a real <tag>. That is deliberate —
+    # confirmation is "did this exact string reflect unencoded?", so the payload
+    # must contain a tag for its presence to actually prove markup injection. A
+    # quote-only payload (e.g. `" onmouseover=...`) could reflect verbatim as
+    # harmless text and cause a false positive, so we don't use those.
+    '"><input autofocus onfocus=alert(1)>',
 ]
 
 _PAYLOADS_SCRIPT = [
@@ -89,8 +112,17 @@ class XSSScanner(BaseModule):
 
         logger.debug("[XSS] %s: reflected in context=%s", param_name, context)
 
-        # Phase 2: inject real payloads
+        # Phase 2: try to prove full XSS (script execution).
         finding = self._test_payloads(url, method, params, param_name, context)
+        if finding:
+            return [finding]
+
+        # Phase 3: fall back to HTML injection. If the app reflects our angle
+        # brackets and tags unencoded but filters/encodes the script-y bits, it's
+        # not script execution — but injecting arbitrary HTML is still a real bug
+        # (content spoofing, fake login forms / phishing, layout hijack). Worth
+        # reporting at a lower severity so it isn't silently missed.
+        finding = self._test_html_injection(url, method, params, param_name)
         return [finding] if finding else []
 
     # ------------------------------------------------------------------
@@ -177,6 +209,14 @@ class XSSScanner(BaseModule):
             payloads = priority + [p for p in payloads if p not in priority]
 
         for payload in payloads:
+            # A payload without a tag (e.g. the script-context breakout
+            # `";alert(1)//`) is only executable when reflected INSIDE a <script>
+            # block. In HTML/attribute context its verbatim reflection is harmless
+            # text — confirming it there would be a false positive. So tagless
+            # payloads are only accepted when the reflection context is "script".
+            if "<" not in payload and context != "script":
+                continue
+
             resp = self._send(url, method, inject_into_params(params, param_name, payload))
             if resp is None:
                 continue
@@ -187,31 +227,133 @@ class XSSScanner(BaseModule):
                     "[XSS] %s=%r reflected unencoded in %s context",
                     param_name, payload, context,
                 )
-                curl = build_curl_command(url, method, params, param_name, payload)
+                return self._make_xss_finding(
+                    url, method, params, param_name, payload, context, evidence,
+                )
+        return None
+
+    def _make_xss_finding(
+        self, url, method, params, param_name, payload, context, evidence,
+    ) -> Finding:
+        """Build a reflected-XSS finding with a plain-language, step-by-step PoC."""
+        full_url = rebuild_url_with_params(url, inject_into_params(params, param_name, payload)) \
+            if method == "GET" else url
+        # Where to paste it, in beginner terms.
+        if method == "GET":
+            open_step = (
+                f"1. Open this exact link in your browser:\n"
+                f"   {full_url}"
+            )
+        else:
+            open_step = (
+                f"1. Go to the page with the '{param_name}' field and type this into it,\n"
+                f"   then submit the form:\n"
+                f"   {payload}"
+            )
+        return Finding(
+            vuln_type="Cross-Site Scripting (Reflected XSS)",
+            url=url,
+            method=method,
+            parameter=param_name,
+            payload=payload,
+            evidence=evidence,
+            confidence="high",
+            details=(
+                f"In plain terms: whatever you type into the '{param_name}' field is "
+                f"dropped straight into the page's HTML without being neutralised, so "
+                f"the browser treats it as CODE instead of text and runs it. Here the "
+                f"input lands in the {context!r} part of the page, and the payload "
+                f"{payload!r} came back exactly as sent (the < > characters were NOT "
+                f"escaped to &lt; &gt;).\n"
+                f"Why it matters: an attacker sends a victim a link like the one below; "
+                f"when the victim opens it while logged in, the attacker's JavaScript "
+                f"runs AS the victim — it can steal their session cookie, act on their "
+                f"behalf, or show a fake login box.\n"
+                f"Fix: HTML-encode every user-supplied value on output (< becomes &lt;, "
+                f"etc.) and add a strict Content-Security-Policy as a second layer."
+            ),
+            reproduction=(
+                f"# --- How to confirm this yourself (no tools needed) ---\n"
+                f"# {open_step}\n"
+                f"# 2. If a little pop-up box (an 'alert') appears, the page just ran\n"
+                f"#    the script you supplied. That IS Cross-Site Scripting — confirmed.\n"
+                f"# 3. Prefer to check without running code? Right-click the page >\n"
+                f"#    'View Page Source', then press Ctrl+F and search for:\n"
+                f"#        {payload}\n"
+                f"#    - VULNERABLE: you find it with real < and > characters, exactly as above.\n"
+                f"#    - SAFE (not vulnerable): you instead see it written as\n"
+                f"#        {_html_escape(payload)}\n"
+                f"#      (the < > were turned into &lt; &gt; — harmless text).\n"
+                f"# 4. Command-line equivalent of step 1:\n"
+                f"{build_curl_command(url, method, params, param_name, payload)}"
+            ),
+        )
+
+    def _test_html_injection(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+    ) -> Optional[Finding]:
+        """Detect HTML injection: arbitrary tags reflected unencoded, even when
+        script execution is blocked.
+
+        We inject a benign, uniquely-named element (e.g. ``<u>okrhtmli1234</u>``).
+        If that EXACT markup — real angle brackets and all — comes back in the
+        response, the app lets us inject HTML. The unique token guarantees we're
+        seeing OUR injection, not markup the page already had. This is a genuine
+        bug (an attacker can inject a fake login form / deface content) and is
+        reported when full XSS could not be proven, so it doesn't get lost.
+        """
+        token = "okrhtmli" + hashlib.md5(
+            f"{param_name}{time.perf_counter()}".encode()
+        ).hexdigest()[:6]
+        # A few benign tags; if any survives with brackets intact, it's injectable.
+        markup_payloads = [
+            f"<u>{token}</u>",
+            f"<h1>{token}</h1>",
+            f"<i>{token}</i>",
+            f"<marquee>{token}</marquee>",
+        ]
+        for payload in markup_payloads:
+            resp = self._send(url, method, inject_into_params(params, param_name, payload))
+            if resp is None:
+                continue
+            if payload in (resp.text or ""):  # exact, brackets-intact reflection
+                idx = resp.text.index(payload)
+                snippet = resp.text[max(0, idx - 40): idx + len(payload) + 40].replace("\n", " ")
+                full_url = rebuild_url_with_params(
+                    url, inject_into_params(params, param_name, payload)
+                ) if method == "GET" else url
+                logger.debug("[XSS->HTMLi] %s: markup %r reflected raw", param_name, payload)
                 return Finding(
-                    vuln_type="Cross-Site Scripting (Reflected XSS)",
+                    vuln_type="HTML Injection",
                     url=url,
                     method=method,
                     parameter=param_name,
                     payload=payload,
-                    evidence=evidence,
-                    confidence="high",
+                    evidence=f"Injected markup reflected unencoded: ...{snippet!r}...",
+                    confidence="medium",
                     details=(
-                        f"XSS payload reflected without encoding in {context!r} context. "
-                        f"Payload: {payload!r}. "
-                        "Remediation: HTML-encode all user-supplied output; "
-                        "apply a strict Content-Security-Policy."
+                        f"In plain terms: the '{param_name}' field lets you inject real "
+                        f"HTML tags into the page (here a {payload!r} tag came back with "
+                        f"its < > intact instead of being escaped). Script execution "
+                        f"appears to be filtered, so this isn't full XSS — but injecting "
+                        f"HTML is still dangerous: an attacker can plant a fake login form, "
+                        f"deface the page, or hide/overlay content for phishing.\n"
+                        f"Fix: HTML-encode user input on output so tags render as text."
                     ),
                     reproduction=(
-                        f"# 1. Send the XSS payload and check if it appears unencoded:\n"
-                        f"{curl}\n"
-                        f"# 2. Search for the payload in the response body:\n"
-                        f"$ # Grep for: {payload}\n"
-                        f"# 3. If the payload is NOT HTML-encoded (< > not replaced by &lt; &gt;),\n"
-                        f"#    the XSS is confirmed.\n"
-                        f"# 4. To verify in a browser: paste the payload in the '{param_name}'\n"
-                        f"#    field and submit. An alert box confirms execution.\n"
-                        f"# 5. For a clean PoC screenshot, use: {payload}"
+                        f"# 1. Open this link (GET) or type the payload into '{param_name}':\n"
+                        f"#    {full_url if method == 'GET' else payload}\n"
+                        f"# 2. Right-click > 'View Page Source', Ctrl+F and search for:\n"
+                        f"#        {payload}\n"
+                        f"#    - VULNERABLE: it appears as a real tag ({payload}).\n"
+                        f"#    - SAFE: it appears as text ({_html_escape(payload)}).\n"
+                        f"# 3. Visual proof: <h1>/<marquee> visibly change the page layout,\n"
+                        f"#    which shows your HTML was accepted as markup, not text.\n"
+                        f"{build_curl_command(url, method, params, param_name, payload)}"
                     ),
                 )
         return None
