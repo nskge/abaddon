@@ -1,0 +1,34 @@
+id: error-based-sqli-generic
+info:
+  name: Error-based SQL Injection (generic param)
+  severity: critical
+  author: abaddon
+  description: >
+    Injects breaking characters into common id params and matches DBMS error
+    signatures (MySQL/PostgreSQL/MSSQL/Oracle/SQLite).
+  tags: [sqli, injection]
+confidence_threshold: 0.6
+requests:
+  - method: GET
+    path:
+      - "/?id={{payload}}"
+      - "/item?id={{payload}}"
+      - "/product?id={{payload}}"
+    payloads:
+      - "1'"
+      - "1\""
+      - "1')"
+    matchers:
+      - type: regex
+        part: body
+        regex:
+          - "SQL syntax.*MySQL"
+          - "Warning.*\\bmysqli?_"
+          - "PostgreSQL.*ERROR"
+          - "valid MySQL result"
+          - "ORA-[0-9]{5}"
+          - "Microsoft SQL (Server|Native Client)"
+          - "SQLite/JDBCDriver"
+          - "Unclosed quotation mark after the character string"
+        condition: or
+        confidence: 0.8

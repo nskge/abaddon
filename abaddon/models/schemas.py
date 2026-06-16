@@ -116,7 +116,9 @@ class EntropyMatcher(_BaseMatcher):
 class ReflectionMatcher(_BaseMatcher):
     type: Literal["reflection"]
     # Marker injected in the payload; matcher confirms it breaks HTML/JS context.
-    marker: str
+    # When the request fuzzes with {{payload}}, the runner sets the marker to the
+    # payload itself, so this may be left empty in fuzzing templates.
+    marker: str = ""
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
 
@@ -182,6 +184,10 @@ class RequestSpec(_Strict):
     matchers_condition: Literal["and", "or", "dsl"] = Field(
         default="or", alias="matchers-condition"
     )
+    # Fuzzing payloads. When set, the runner emits one probe per payload,
+    # substituting {{payload}} in path/headers/body. For reflection matchers the
+    # payload becomes the marker automatically.
+    payloads: List[str] = Field(default_factory=list)
     # Send N times and require consistent matching (for time/differential checks).
     repeat: int = Field(default=1, ge=1, le=10)
 

@@ -77,19 +77,47 @@ class Scanner:
             isinstance(m, ReflectionMatcher) for m in request.matchers
         ) or any("{{marker}}" in s for s in self._request_strings(request, path))
 
+        # One iteration per payload (or a single un-fuzzed iteration).
+        payloads: List[Optional[str]] = list(request.payloads) or [None]
+        for payload in payloads:
+            finding = await self._run_one(
+                base_url, template, request, path, baseline,
+                payload, needs_oast, needs_marker,
+            )
+            if finding is not None:
+                return finding
+        return None
+
+    async def _run_one(
+        self,
+        base_url: str,
+        template: Template,
+        request: RequestSpec,
+        path: str,
+        baseline: Optional[ProbeResult],
+        payload: Optional[str],
+        needs_oast: bool,
+        needs_marker: bool,
+    ) -> Optional[Finding]:
         handle = self.oast.new_handle() if (needs_oast and self.oast) else None
-        marker = "abdz" + secrets.token_hex(4) if needs_marker else None
+
+        # For reflection fuzzing the payload itself is the marker; otherwise use a
+        # random canary so {{marker}} interpolation produces a detectable token.
+        if needs_marker:
+            marker = payload if payload is not None else "abdz" + secrets.token_hex(4)
+        else:
+            marker = None
 
         variables = {"BaseURL": base_url.rstrip("/")}
         if handle:
             variables["oast"] = handle.payload
         if marker:
             variables["marker"] = marker
+        if payload is not None:
+            variables["payload"] = payload
 
         url = urljoin(base_url, _interpolate(path, variables))
-        headers = {
-            k: _interpolate(v, variables) for k, v in request.headers.items()
-        }
+        headers = {k: _interpolate(v, variables) for k, v in request.headers.items()}
         body = _interpolate(request.body, variables) if request.body else None
 
         probe = Probe(
@@ -97,7 +125,7 @@ class Scanner:
             method=request.method,
             headers=headers or None,
             data=body,
-            meta={"template": template.id},
+            meta={"template": template.id, "payload": payload},
         )
 
         # Repeat for time-based checks → median elapsed.
@@ -106,9 +134,7 @@ class Scanner:
         for _ in range(request.repeat):
             result = await self.engine.send(probe)
             elapseds.append(result.elapsed)
-        if result is None:
-            return None
-        if result.error and result.status_code is None:
+        if result is None or (result.error and result.status_code is None):
             return None
 
         median_elapsed = statistics.median(elapseds) if elapseds else result.elapsed

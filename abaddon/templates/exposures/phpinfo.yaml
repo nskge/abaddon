@@ -1,0 +1,27 @@
+id: phpinfo-disclosure
+info:
+  name: phpinfo() page exposed
+  severity: medium
+  author: abaddon
+  description: An exposed phpinfo() page leaks environment, paths, and module config.
+  tags: [exposure, php, info-leak]
+requests:
+  - method: GET
+    path:
+      - "/phpinfo.php"
+      - "/info.php"
+      - "/phpinfo"
+      - "/test.php"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status: [200]
+        confidence: 0.3
+      - type: word
+        part: body
+        words:
+          - "PHP Version"
+          - "<title>phpinfo()"
+          - "Configuration File (php.ini) Path"
+        condition: or
+        confidence: 0.65

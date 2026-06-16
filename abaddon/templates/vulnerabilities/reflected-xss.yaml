@@ -1,0 +1,22 @@
+id: reflected-xss-generic
+info:
+  name: Reflected XSS (generic param)
+  severity: high
+  author: abaddon
+  description: >
+    Injects an XSS canary into common reflection params and confirms the markup
+    is reflected unescaped (HTML/JS context), not merely echoed.
+  tags: [xss, injection]
+confidence_threshold: 0.6
+requests:
+  - method: GET
+    path:
+      - "/?q={{payload}}"
+      - "/search?q={{payload}}"
+      - "/?s={{payload}}"
+    payloads:
+      - "abdz<svg/onload=alert(1)>"
+      - "abdz\"><script>alert(1)</script>"
+    matchers:
+      - type: reflection
+        confidence: 0.75

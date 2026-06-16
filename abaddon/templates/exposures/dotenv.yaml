@@ -1,0 +1,31 @@
+id: dotenv-exposure
+info:
+  name: Exposed .env file
+  severity: high
+  author: abaddon
+  description: A readable .env exposes secrets — DB credentials, API keys, app keys.
+  tags: [exposure, config, secrets]
+requests:
+  - method: GET
+    path:
+      - "/.env"
+      - "/.env.local"
+      - "/.env.production"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status: [200]
+        confidence: 0.35
+      - type: regex
+        part: body
+        regex:
+          - "DB_(PASSWORD|HOST|USERNAME|DATABASE)="
+          - "APP_KEY=base64:"
+          - "(AWS|SECRET|API)_[A-Z_]*KEY="
+        condition: or
+        confidence: 0.65
+    extractors:
+      - type: regex
+        name: secrets
+        regex:
+          - "([A-Z0-9_]+)=.+"
