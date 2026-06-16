@@ -99,7 +99,7 @@ Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
 - **ABADDON async engine** — optional high-concurrency core (`python -m abaddon`): `httpx.AsyncClient` + HTTP/2, Nuclei-style YAML templates (Pydantic V2 validated), smart matchers (OAST out-of-band, time/entropy deltas, context-aware reflection) with multi-signal **confidence correlation**, per-host adaptive throttling, and JSONL output for SIEM
-- **398 unit tests** — plus `tools/ctf_recall.py`, which measures detection recall against a ground-truth CTF (currently **9/9**)
+- **424 unit tests** — plus `tools/ctf_recall.py`, which measures detection recall against a ground-truth CTF (currently **9/9**)
 
 ---
 
@@ -122,18 +122,37 @@ python main.py --version  # Abaddon v2.13.0
 
 ---
 
+## Menu
+
+Run with no arguments to enter the interactive TUI:
+
+```
+python main.py
+python -m abaddon
+```
+
+```
+  1  Quick Scan       Run all modules against a target URL
+  2  Single Module    Pick one vulnerability class (SQLi, XSS, IDOR, …)
+  3  Abaddon Engine   Async template scan — OAST, fuzzing, confidence correlation
+  4  Recon Tools      Port scan + path and subdomain discovery
+  5  Options          Threads, proxy, scope globs, WAF evasion level, timeout
+  6  Help / About     Usage notes and version info
+  0  Exit
+```
+
+The classic flag-based CLI is still available — any argument after `main.py` skips the menu.
+
+---
+
 ## Usage
 
 ```bash
-# Interactive menu (no arguments) — dark-purple TUI
-python main.py
-python -m abaddon
+# Full scan — all modules, all params
+python main.py -u "http://target/page?id=1"
 
 # Async template engine (OAST, fuzzing, confidence correlation)
 python -m abaddon -u "http://target/" --scope "*.target.com"
-
-# Full scan on all modules
-python main.py -u "http://target/page?id=1"
 
 # Auto-detect and test HTML forms
 python main.py -u "http://target/search.php" --crawl
@@ -250,7 +269,7 @@ Output:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 398 tests
+python -m pytest tests/ -v     # 424 tests
 ```
 
 ---

@@ -24,6 +24,21 @@ from .modules.base import Finding
 
 logger = logging.getLogger("vulnscanner")
 
+
+def _to_grep_pattern(rx: "re.Pattern") -> str:
+    """Convert a Python regex to a shell-safe grep -iE pattern.
+
+    Strips inline-flag groups ((?i), (?m) etc.) and converts non-capturing
+    groups (?:...) to plain groups so the pattern is valid POSIX ERE.
+    Double-quotes inside are escaped so the caller can wrap the result in
+    double-quotes on the command line.
+    """
+    p = rx.pattern
+    p = re.sub(r"\(\?[a-z]+\)", "", p)   # remove (?i), (?m), etc.
+    p = p.replace("(?:", "(")            # (?:...) → (...) — ERE-compatible
+    p = p.replace('"', '\\"')            # escape " so the shell string is valid
+    return p[:120]
+
 # (name, compiled regex, confidence, description)
 _SECRET_PATTERNS: List[Tuple[str, "re.Pattern", str, str]] = [
     (
@@ -161,7 +176,7 @@ def scan_pages(pages) -> List[Finding]:
                             f"# 1. Fetch the resource:\n"
                             f"$ curl -s '{url}'\n"
                             f"# 2. Search the body for the secret:\n"
-                            f"$ curl -s '{url}' | grep -Eo '{rx.pattern[:60]}'\n"
+                            f'$ curl -s \'{url}\' | grep -iEo "{_to_grep_pattern(rx)}"\n'
                             f"# 3. The value above is served to every client — rotate it."
                         ),
                     ))
