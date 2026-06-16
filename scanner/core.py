@@ -149,6 +149,7 @@ class Scanner:
         self.findings: List[Finding] = []
         self._seen_keys: set = set()  # dedup: (vuln_type, url, param, payload)
         self._no_color = config.get("no_color", False)
+        self._detected_waf: str = ""   # set by _preflight_check on WAF detection
 
         # Adaptive rate limiter (shared across all module threads)
         self._rate_limiter = None
@@ -283,6 +284,10 @@ class Scanner:
             # per-param loop and merge their findings with dedup.
             if self._orchestrated_enabled() and self._crawl_result is not None:
                 self._run_active_checks_phase(url)
+
+            # External tool pass — runs when explicitly requested, or when the
+            # primary scan returned nothing and a WAF was detected.
+            self._run_ext_tools(url, method, self.config.get("param"))
 
         except KeyboardInterrupt:
             self._interrupted = True
@@ -677,6 +682,7 @@ class Scanner:
             body_lower = resp.text.lower()
             for pattern, waf_name in _WAF_SIGNATURES:
                 if re.search(pattern, body_lower, re.IGNORECASE):
+                    self._detected_waf = waf_name
                     logger.warning(
                         "WAF/bot-protection detected (%s) -- HTTP %d. "
                         "Requests are blocked before reaching the application; "
@@ -770,6 +776,95 @@ class Scanner:
             )
 
         return False
+
+    # ------------------------------------------------------------------
+    # External tool integration (sqlmap / dalfox)
+    # ------------------------------------------------------------------
+
+    def _run_ext_tools(self, url: str, method: str, param: Optional[str]) -> None:
+        """Secondary scan pass using external tools when explicitly requested.
+
+        Activated by:
+          - config["use_sqlmap"]  → run sqlmap (SQLi)
+          - config["use_dalfox"]  → run dalfox (XSS)
+          - config["ext_tools"]   → run both
+
+        Results are added to self.findings with the same dedup logic.
+        """
+        scan_type = self.config.get("scan_type", "all")
+        use_sqlmap = self.config.get("use_sqlmap") or self.config.get("ext_tools")
+        use_dalfox = self.config.get("use_dalfox") or self.config.get("ext_tools")
+        waf = self._detected_waf
+
+        # Detect DBMS from native findings to hint sqlmap.
+        dbms = None
+        for f in self.findings:
+            vt = f.vuln_type.lower()
+            for db in ("mysql", "mssql", "postgresql", "oracle", "sqlite"):
+                if db in vt or db in (f.evidence or "").lower():
+                    dbms = db
+                    break
+
+        if use_sqlmap and scan_type in ("sqli", "all"):
+            sqli_findings = [f for f in self.findings if "sql" in f.vuln_type.lower()]
+            if not sqli_findings or waf:
+                self._ext_sqlmap(url, param, waf, dbms)
+
+        if use_dalfox and scan_type in ("xss", "all"):
+            xss_findings = [f for f in self.findings if "xss" in f.vuln_type.lower()
+                            or "cross-site" in f.vuln_type.lower()]
+            if not xss_findings or waf:
+                self._ext_dalfox(url, waf)
+
+    def _ext_sqlmap(self, url: str, param: Optional[str], waf: str, dbms: Optional[str]) -> None:
+        from .tools.sqlmap import SqlmapRunner
+        from .tools import is_available
+        if not is_available("sqlmap"):
+            if not self.config.get("quiet"):
+                print(self._c(
+                    "   [i] sqlmap not found on PATH — install it to enable the secondary pass.",
+                    _DIM,
+                ))
+            return
+        if not self.config.get("quiet"):
+            waf_note = f" (WAF: {waf})" if waf else ""
+            print(self._c(
+                f"   [~] Launching sqlmap secondary pass{waf_note}...",
+                _YELLOW,
+            ))
+        runner = SqlmapRunner(self.config)
+        new_findings = runner.run(url, param=param, waf_name=waf, dbms=dbms)
+        for f in new_findings:
+            self._add_finding(f)
+        if new_findings and not self.config.get("quiet"):
+            print(self._c(
+                f"   [+] sqlmap: {len(new_findings)} finding(s) added.", _GREEN,
+            ))
+
+    def _ext_dalfox(self, url: str, waf: str) -> None:
+        from .tools.dalfox import DalfoxRunner
+        from .tools import is_available
+        if not is_available("dalfox"):
+            if not self.config.get("quiet"):
+                print(self._c(
+                    "   [i] dalfox not found on PATH — install it to enable the secondary XSS pass.",
+                    _DIM,
+                ))
+            return
+        if not self.config.get("quiet"):
+            waf_note = f" (WAF: {waf})" if waf else ""
+            print(self._c(
+                f"   [~] Launching dalfox secondary pass{waf_note}...",
+                _YELLOW,
+            ))
+        runner = DalfoxRunner(self.config)
+        new_findings = runner.run(url, waf_name=waf)
+        for f in new_findings:
+            self._add_finding(f)
+        if new_findings and not self.config.get("quiet"):
+            print(self._c(
+                f"   [+] dalfox: {len(new_findings)} finding(s) added.", _GREEN,
+            ))
 
     def _passive_secret_scan(self, url: str, baseline_resp) -> None:
         """Scan the page body + its same-origin <script src> bundles for secrets.

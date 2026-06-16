@@ -124,6 +124,24 @@ Examples
         ),
     )
 
+    # ---- External tools ----
+    ext = parser.add_argument_group("External tools (secondary pass)")
+    ext.add_argument(
+        "--use-sqlmap", action="store_true",
+        help=(
+            "Run sqlmap as a secondary SQLi pass after the native engine. "
+            "Automatically applies WAF tamper scripts when Cloudflare/ModSecurity is detected."
+        ),
+    )
+    ext.add_argument(
+        "--use-dalfox", action="store_true",
+        help="Run dalfox as a secondary XSS pass after the native engine.",
+    )
+    ext.add_argument(
+        "--ext-tools", action="store_true",
+        help="Enable all external tool integrations (sqlmap + dalfox).",
+    )
+
     # ---- Recon extras ----
     recon = parser.add_argument_group("Recon extras")
     recon.add_argument(
@@ -324,6 +342,10 @@ def main() -> int:
         "rate_limit_delay": args.rate_delay,
         "bb_note":          args.bb_note,
         "bb_program":       args.bb_program,
+        # External tool integration
+        "use_sqlmap":       getattr(args, "use_sqlmap", False),
+        "use_dalfox":       getattr(args, "use_dalfox", False),
+        "ext_tools":        getattr(args, "ext_tools", False),
     }
 
     scanner = Scanner(config, logger)

@@ -118,6 +118,8 @@ class MenuState:
     crawl: bool = False
     follow_redirects: bool = False
     verbose: bool = False
+    use_sqlmap: bool = False
+    use_dalfox: bool = False
 
     def build_config(self, url: str, scan_type: str, **overrides) -> Dict:
         """Build the classic-scanner config dict (mirrors main.py)."""
@@ -159,6 +161,9 @@ class MenuState:
             "rate_limit_delay": self.rate_delay,
             "bb_note": None,
             "bb_program": None,
+            "use_sqlmap": self.use_sqlmap,
+            "use_dalfox": self.use_dalfox,
+            "ext_tools": False,
         }
         config.update(overrides)
         return config
@@ -172,6 +177,10 @@ class MenuState:
             f"proxy={self.proxy or '-'}",
             f"scope={self.scope or '-'}",
         ]
+        if self.use_sqlmap:
+            parts.append("sqlmap=on")
+        if self.use_dalfox:
+            parts.append("dalfox=on")
         return "  ".join(parts)
 
 
@@ -434,6 +443,19 @@ def action_options(console: Console, state: MenuState) -> None:
     state.proxy = Prompt.ask("proxy URL (blank=none)", default=state.proxy, console=console)
     state.scope = Prompt.ask("scope globs (blank=none)", default=state.scope, console=console)
     state.crawl = Prompt.ask("crawl forms? (y/n)", default="y" if state.crawl else "n", console=console).lower().startswith("y")
+
+    console.print()
+    console.print("[title]External tools[/title] [dim](secondary pass after native engine)[/dim]")
+    state.use_sqlmap = Prompt.ask(
+        "sqlmap for SQLi? (y/n)", default="y" if state.use_sqlmap else "n", console=console
+    ).lower().startswith("y")
+    state.use_dalfox = Prompt.ask(
+        "dalfox for XSS? (y/n)", default="y" if state.use_dalfox else "n", console=console
+    ).lower().startswith("y")
+    if state.use_sqlmap or state.use_dalfox:
+        from .tools_check import check_ext_tools
+        check_ext_tools(console, state.use_sqlmap, state.use_dalfox)
+
     console.print("\n[ok]options updated.[/ok]")
 
 
