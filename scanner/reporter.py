@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from .correlate import correlate_findings
+from .exploit_hints import suggest as _exploit_hint
 from .modules.base import Finding
 from . import __version__
 
@@ -172,11 +173,24 @@ class Reporter:
                     if not line:
                         print()
                     elif line.startswith("$"):
-                        # Shell command — highlight it
                         print(self._c(f"      {line}", WHITE + BOLD))
                     elif line.startswith("#"):
-                        # Comment / step header
                         print(self._c(f"      {line}", YELLOW))
+                    else:
+                        print(self._c(f"      {line}", DIM))
+
+            hint = _exploit_hint(f)
+            if hint:
+                print()
+                print(self._c("      -- Exploitation / next steps --", BOLD + MAGENTA))
+                for line in hint.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        print()
+                    elif line.startswith("$"):
+                        print(self._c(f"      {line}", CYAN + BOLD))
+                    elif line.startswith("#"):
+                        print(self._c(f"      {line}", MAGENTA))
                     else:
                         print(self._c(f"      {line}", DIM))
             print()
@@ -259,11 +273,19 @@ class Reporter:
 
     def _write_json(self, findings: List[Finding], path: str) -> None:
         attack_paths = correlate_findings(findings)
+
+        def _enrich(f: Finding) -> dict:
+            d = f.to_dict()
+            hint = _exploit_hint(f)
+            if hint:
+                d["exploitation"] = hint
+            return d
+
         data = {
             "tool": f"Abaddon v{__version__}",
             "timestamp": self._ts(),
             "total": len(findings),
-            "findings": [f.to_dict() for f in findings],
+            "findings": [_enrich(f) for f in findings],
             "attack_paths": [p.to_dict() for p in attack_paths],
         }
         with open(path, "w", encoding="utf-8") as fh:
@@ -292,6 +314,11 @@ class Reporter:
             if f.reproduction:
                 lines.append(f"    Reproduce  :")
                 for rline in f.reproduction.strip().split("\n"):
+                    lines.append(f"                 {rline.strip()}")
+            hint = _exploit_hint(f)
+            if hint:
+                lines.append(f"    Exploit    :")
+                for rline in hint.strip().split("\n"):
                     lines.append(f"                 {rline.strip()}")
             lines.append("")
         with open(path, "w", encoding="utf-8") as fh:
