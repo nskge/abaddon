@@ -1,0 +1,23 @@
+id: git-dir-exposed
+info:
+  name: Exposed .git directory
+  severity: medium
+  author: abaddon
+  description: Validation template — detects a readable .git/config file.
+  tags: [exposure, git]
+requests:
+  - method: GET
+    path:
+      - "/.git/config"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status: [200]
+        confidence: 0.4
+      - type: word
+        part: body
+        words:
+          - "[core]"
+          - "repositoryformatversion"
+        condition: or
+        confidence: 0.6

@@ -1,0 +1,30 @@
+id: git-config-exposure
+info:
+  name: Exposed .git/config
+  severity: medium
+  author: abaddon
+  description: A readable .git/config exposes repository metadata and remote URLs.
+  tags: [exposure, git, misconfig]
+  reference:
+    - https://owasp.org/www-community/attacks/Source_Code_Disclosure
+requests:
+  - method: GET
+    path:
+      - "/.git/config"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status: [200]
+        confidence: 0.4
+      - type: word
+        part: body
+        words:
+          - "[core]"
+          - "repositoryformatversion"
+        condition: or
+        confidence: 0.6
+    extractors:
+      - type: regex
+        name: remote_url
+        regex:
+          - "url = (.+)"
