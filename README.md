@@ -66,7 +66,7 @@ Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.
 
 ```bash
 git clone https://github.com/nskge/abaddon.git
-cd abaddon/vuln_scanner
+cd abaddon
 pip install -r requirements.txt
 # JS-aware crawl (optional)
 pip install playwright && python -m playwright install chromium
