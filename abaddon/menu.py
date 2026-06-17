@@ -108,6 +108,7 @@ class MenuState:
 
     method: str = "GET"
     data: str = ""
+    cookies_raw: str = ""   # raw cookie string: "session=abc; token=xyz"
     threads: int = 4
     timeout: int = 10
     proxy: str = ""
@@ -120,6 +121,19 @@ class MenuState:
     verbose: bool = False
     use_sqlmap: bool = False
     use_dalfox: bool = False
+    use_nuclei: bool = False
+    use_nikto: bool = False
+    use_wpscan: bool = False
+
+    def _parse_cookies(self) -> Dict[str, str]:
+        """Parse raw cookie string 'k=v; k2=v2' into a dict."""
+        cookies: Dict[str, str] = {}
+        for pair in self.cookies_raw.split(";"):
+            pair = pair.strip()
+            if "=" in pair:
+                k, _, v = pair.partition("=")
+                cookies[k.strip()] = v.strip()
+        return cookies
 
     def build_config(self, url: str, scan_type: str, **overrides) -> Dict:
         """Build the classic-scanner config dict (mirrors main.py)."""
@@ -145,7 +159,7 @@ class MenuState:
             "auth_password2": None,
             "orchestrated": False,
             "headers": {"User-Agent": ua},
-            "cookies": {},
+            "cookies": self._parse_cookies(),
             "proxy": self.proxy or None,
             "timeout": self.timeout,
             "follow_redirects": self.follow_redirects,
@@ -163,6 +177,9 @@ class MenuState:
             "bb_program": None,
             "use_sqlmap": self.use_sqlmap,
             "use_dalfox": self.use_dalfox,
+            "use_nuclei": self.use_nuclei,
+            "use_nikto":  self.use_nikto,
+            "use_wpscan": self.use_wpscan,
             "ext_tools": False,
         }
         config.update(overrides)
@@ -177,10 +194,20 @@ class MenuState:
             f"proxy={self.proxy or '-'}",
             f"scope={self.scope or '-'}",
         ]
+        if self.cookies_raw:
+            # Show first key only to avoid spilling session tokens in the header
+            first_key = self.cookies_raw.split("=")[0].strip()
+            parts.append(f"cookies={first_key}=...")
         if self.use_sqlmap:
             parts.append("sqlmap=on")
         if self.use_dalfox:
             parts.append("dalfox=on")
+        if self.use_nuclei:
+            parts.append("nuclei=on")
+        if self.use_nikto:
+            parts.append("nikto=on")
+        if self.use_wpscan:
+            parts.append("wpscan=on")
         return "  ".join(parts)
 
 
@@ -437,6 +464,15 @@ def action_options(console: Console, state: MenuState) -> None:
 
     console.print("[title]Options[/title] [dim](enter = keep current)[/dim]\n")
     state.method = Prompt.ask("HTTP method", default=state.method, console=console)
+    state.data   = Prompt.ask("POST data (blank=none)", default=state.data, console=console)
+
+    raw_ck = Prompt.ask(
+        "cookies (key=val; key2=val2, blank=none)",
+        default=state.cookies_raw,
+        console=console,
+    ).strip()
+    state.cookies_raw = raw_ck
+
     state.threads = IntPrompt.ask("threads", default=state.threads, console=console)
     state.timeout = IntPrompt.ask("timeout (s)", default=state.timeout, console=console)
     state.waf_evasion = IntPrompt.ask("WAF evasion (0-3)", default=state.waf_evasion, console=console)
@@ -445,16 +481,27 @@ def action_options(console: Console, state: MenuState) -> None:
     state.crawl = Prompt.ask("crawl forms? (y/n)", default="y" if state.crawl else "n", console=console).lower().startswith("y")
 
     console.print()
-    console.print("[title]External tools[/title] [dim](secondary pass after native engine)[/dim]")
-    state.use_sqlmap = Prompt.ask(
-        "sqlmap for SQLi? (y/n)", default="y" if state.use_sqlmap else "n", console=console
-    ).lower().startswith("y")
-    state.use_dalfox = Prompt.ask(
-        "dalfox for XSS? (y/n)", default="y" if state.use_dalfox else "n", console=console
-    ).lower().startswith("y")
-    if state.use_sqlmap or state.use_dalfox:
+    console.print("[title]External tools[/title] [dim](secondary pass — only when native finds nothing or WAF blocks)[/dim]")
+
+    def _yn(label: str, current: bool) -> bool:
+        return Prompt.ask(label, default="y" if current else "n", console=console).lower().startswith("y")
+
+    state.use_sqlmap = _yn("sqlmap for SQLi? (y/n)", state.use_sqlmap)
+    state.use_dalfox = _yn("dalfox for XSS? (y/n)", state.use_dalfox)
+    state.use_nuclei = _yn("nuclei CVE/template scan? (y/n)", state.use_nuclei)
+    state.use_nikto  = _yn("nikto web server audit? (y/n)", state.use_nikto)
+    state.use_wpscan = _yn("wpscan (WordPress)? (y/n)", state.use_wpscan)
+
+    if any([state.use_sqlmap, state.use_dalfox, state.use_nuclei, state.use_nikto, state.use_wpscan]):
         from .tools_check import check_ext_tools
-        check_ext_tools(console, state.use_sqlmap, state.use_dalfox)
+        check_ext_tools(
+            console,
+            state.use_sqlmap,
+            state.use_dalfox,
+            state.use_nuclei,
+            state.use_nikto,
+            state.use_wpscan,
+        )
 
     console.print("\n[ok]options updated.[/ok]")
 

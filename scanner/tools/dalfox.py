@@ -109,14 +109,20 @@ class DalfoxRunner:
     def __init__(self, config: Dict) -> None:
         self.config = config
 
-    def run(self, url: str, waf_name: str = "") -> List[Finding]:
+    def run(
+        self,
+        url: str,
+        waf_name: str = "",
+        override_method: str = "",
+        override_data: str = "",
+    ) -> List[Finding]:
         from . import is_available
         if not is_available("dalfox"):
             logger.warning("[dalfox] not found on PATH — skipping.")
             return []
 
-        method   = self.config.get("method", "GET").upper()
-        data     = self.config.get("data") or ""
+        method   = (override_method or self.config.get("method", "GET")).upper()
+        data     = override_data or self.config.get("data") or ""
         cookies_d = self.config.get("cookies") or {}
         cookies_s = "; ".join(f"{k}={v}" for k, v in cookies_d.items())
         proxy    = self.config.get("proxy")

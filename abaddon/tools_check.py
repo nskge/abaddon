@@ -3,19 +3,39 @@
 from rich.console import Console
 
 
-def check_ext_tools(console: Console, check_sqlmap: bool, check_dalfox: bool) -> None:
+_INSTALL_HINTS = {
+    "sqlmap":  "pip install sqlmap  or  apt install sqlmap",
+    "dalfox":  "go install github.com/hahwul/dalfox/v2@latest",
+    "nuclei":  "go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+    "nikto":   "apt install nikto  or  brew install nikto",
+    "wpscan":  "gem install wpscan",
+}
+
+
+def check_ext_tools(
+    console: Console,
+    check_sqlmap: bool = False,
+    check_dalfox: bool = False,
+    check_nuclei: bool = False,
+    check_nikto: bool = False,
+    check_wpscan: bool = False,
+) -> None:
     from scanner.tools import is_available, check_version
     console.print()
-    if check_sqlmap:
-        if is_available("sqlmap"):
-            ver = check_version("sqlmap") or "?"
-            console.print(f"  [ok]sqlmap[/ok] [dim]{ver}[/dim]")
+    checks = [
+        ("sqlmap",  check_sqlmap),
+        ("dalfox",  check_dalfox),
+        ("nuclei",  check_nuclei),
+        ("nikto",   check_nikto),
+        ("wpscan",  check_wpscan),
+    ]
+    for binary, enabled in checks:
+        if not enabled:
+            continue
+        if is_available(binary):
+            ver = check_version(binary) or "installed"
+            console.print(f"  [ok]{binary}[/ok] [dim]{ver}[/dim]")
         else:
-            console.print("  [warn]sqlmap not found[/warn] — install: pip install sqlmap  or  apt install sqlmap")
-    if check_dalfox:
-        if is_available("dalfox"):
-            ver = check_version("dalfox") or "?"
-            console.print(f"  [ok]dalfox[/ok] [dim]{ver}[/dim]")
-        else:
-            console.print("  [warn]dalfox not found[/warn] — install: go install github.com/hahwul/dalfox/v2@latest")
+            hint = _INSTALL_HINTS.get(binary, "check your PATH")
+            console.print(f"  [warn]{binary} not found[/warn] — install: {hint}")
     console.print()

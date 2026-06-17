@@ -81,6 +81,28 @@ class TestMenuState(unittest.TestCase):
     def test_summary_is_string(self):
         self.assertIn("threads=", MenuState().summary())
 
+    def test_cookies_raw_parsed_into_dict(self):
+        state = MenuState(cookies_raw="session=abc123; role=admin")
+        config = state.build_config("http://t/", "all")
+        self.assertEqual(config["cookies"]["session"], "abc123")
+        self.assertEqual(config["cookies"]["role"], "admin")
+
+    def test_cookies_empty_gives_empty_dict(self):
+        state = MenuState(cookies_raw="")
+        config = state.build_config("http://t/", "all")
+        self.assertEqual(config["cookies"], {})
+
+    def test_summary_shows_cookie_key(self):
+        state = MenuState(cookies_raw="session=abc")
+        self.assertIn("cookies=session=...", state.summary())
+
+    def test_ext_tools_in_config(self):
+        state = MenuState(use_sqlmap=True, use_nuclei=True, use_wpscan=True)
+        config = state.build_config("http://t/", "all")
+        self.assertTrue(config["use_sqlmap"])
+        self.assertTrue(config["use_nuclei"])
+        self.assertTrue(config["use_wpscan"])
+
 
 class TestScope(unittest.TestCase):
 

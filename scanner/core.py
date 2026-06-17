@@ -150,6 +150,7 @@ class Scanner:
         self._seen_keys: set = set()  # dedup: (vuln_type, url, param, payload)
         self._no_color = config.get("no_color", False)
         self._detected_waf: str = ""   # set by _preflight_check on WAF detection
+        self._form_targets: List[Dict] = []  # form targets with their POST data
 
         # Adaptive rate limiter (shared across all module threads)
         self._rate_limiter = None
@@ -787,13 +788,20 @@ class Scanner:
         Activated by:
           - config["use_sqlmap"]  → run sqlmap (SQLi)
           - config["use_dalfox"]  → run dalfox (XSS)
-          - config["ext_tools"]   → run both
+          - config["use_nuclei"]  → run nuclei (CVE/template scan)
+          - config["use_nikto"]   → run nikto (web server audit)
+          - config["use_wpscan"]  → run wpscan (WordPress)
+          - config["ext_tools"]   → run all
 
-        Results are added to self.findings with the same dedup logic.
+        Runs on both the seed URL and any discovered form targets so POST
+        parameters are tested with the correct --data argument.
         """
         scan_type = self.config.get("scan_type", "all")
         use_sqlmap = self.config.get("use_sqlmap") or self.config.get("ext_tools")
         use_dalfox = self.config.get("use_dalfox") or self.config.get("ext_tools")
+        use_nuclei = self.config.get("use_nuclei") or self.config.get("ext_tools")
+        use_nikto  = self.config.get("use_nikto")  or self.config.get("ext_tools")
+        use_wpscan = self.config.get("use_wpscan") or self.config.get("ext_tools")
         waf = self._detected_waf
 
         # Detect DBMS from native findings to hint sqlmap.
@@ -805,66 +813,234 @@ class Scanner:
                     dbms = db
                     break
 
+        # Build a list of (url, param, method, data) tuples to scan.
+        # Seed target + all discovered form targets so POST params get --data.
+        _seed_data = self.config.get("data") or ""
+        scan_targets = [(url, param, method, _seed_data)]
+        for ft in self._form_targets:
+            ft_data = "&".join(f"{k}={v}" for k, v in ft["params"].items())
+            scan_targets.append((ft["url"], None, ft["method"], ft_data))
+        # Deduplicate by (url, method)
+        seen_t = set()
+        unique_targets = []
+        for t in scan_targets:
+            key = (t[0], t[2])
+            if key not in seen_t:
+                seen_t.add(key)
+                unique_targets.append(t)
+
         if use_sqlmap and scan_type in ("sqli", "all"):
             sqli_findings = [f for f in self.findings if "sql" in f.vuln_type.lower()]
-            if not sqli_findings or waf:
-                self._ext_sqlmap(url, param, waf, dbms)
+            for t_url, t_param, t_method, t_data in unique_targets:
+                if not sqli_findings or waf:
+                    self._ext_sqlmap(t_url, t_param, waf, dbms,
+                                     override_method=t_method, override_data=t_data)
 
         if use_dalfox and scan_type in ("xss", "all"):
             xss_findings = [f for f in self.findings if "xss" in f.vuln_type.lower()
                             or "cross-site" in f.vuln_type.lower()]
-            if not xss_findings or waf:
-                self._ext_dalfox(url, waf)
+            for t_url, t_param, t_method, t_data in unique_targets:
+                if not xss_findings or waf:
+                    self._ext_dalfox(t_url, waf,
+                                     override_method=t_method, override_data=t_data)
 
-    def _ext_sqlmap(self, url: str, param: Optional[str], waf: str, dbms: Optional[str]) -> None:
+        if use_nuclei and scan_type in ("all", "headers"):
+            self._ext_nuclei(url)
+
+        if use_nikto and scan_type in ("all", "headers"):
+            self._ext_nikto(url)
+
+        if use_wpscan:
+            self._ext_wpscan(url)
+
+        # Always print next-step suggestions based on what was found
+        if not self.config.get("quiet"):
+            self._suggest_follow_up(url)
+
+    def _ext_sqlmap(
+        self, url: str, param: Optional[str], waf: str, dbms: Optional[str],
+        override_method: str = "", override_data: str = "",
+    ) -> None:
         from .tools.sqlmap import SqlmapRunner
         from .tools import is_available
         if not is_available("sqlmap"):
             if not self.config.get("quiet"):
                 print(self._c(
-                    "   [i] sqlmap not found on PATH — install it to enable the secondary pass.",
+                    "   [i] sqlmap not found — install: pip install sqlmap  or  apt install sqlmap",
                     _DIM,
                 ))
             return
         if not self.config.get("quiet"):
             waf_note = f" (WAF: {waf})" if waf else ""
+            method_note = f" [{override_method} form]" if override_method and override_method.upper() == "POST" else ""
             print(self._c(
-                f"   [~] Launching sqlmap secondary pass{waf_note}...",
+                f"   [~] Launching sqlmap{method_note}{waf_note}...",
                 _YELLOW,
             ))
         runner = SqlmapRunner(self.config)
-        new_findings = runner.run(url, param=param, waf_name=waf, dbms=dbms)
+        new_findings = runner.run(
+            url, param=param, waf_name=waf, dbms=dbms,
+            override_method=override_method, override_data=override_data,
+        )
         for f in new_findings:
             self._add_finding(f)
         if new_findings and not self.config.get("quiet"):
-            print(self._c(
-                f"   [+] sqlmap: {len(new_findings)} finding(s) added.", _GREEN,
-            ))
+            print(self._c(f"   [+] sqlmap: {len(new_findings)} finding(s) added.", _GREEN))
 
-    def _ext_dalfox(self, url: str, waf: str) -> None:
+    def _ext_dalfox(
+        self, url: str, waf: str,
+        override_method: str = "", override_data: str = "",
+    ) -> None:
         from .tools.dalfox import DalfoxRunner
         from .tools import is_available
         if not is_available("dalfox"):
             if not self.config.get("quiet"):
                 print(self._c(
-                    "   [i] dalfox not found on PATH — install it to enable the secondary XSS pass.",
+                    "   [i] dalfox not found — install: go install github.com/hahwul/dalfox/v2@latest",
                     _DIM,
                 ))
             return
         if not self.config.get("quiet"):
             waf_note = f" (WAF: {waf})" if waf else ""
-            print(self._c(
-                f"   [~] Launching dalfox secondary pass{waf_note}...",
-                _YELLOW,
-            ))
+            method_note = f" [POST form]" if override_method and override_method.upper() == "POST" else ""
+            print(self._c(f"   [~] Launching dalfox{method_note}{waf_note}...", _YELLOW))
         runner = DalfoxRunner(self.config)
-        new_findings = runner.run(url, waf_name=waf)
+        new_findings = runner.run(
+            url, waf_name=waf,
+            override_method=override_method, override_data=override_data,
+        )
         for f in new_findings:
             self._add_finding(f)
         if new_findings and not self.config.get("quiet"):
-            print(self._c(
-                f"   [+] dalfox: {len(new_findings)} finding(s) added.", _GREEN,
-            ))
+            print(self._c(f"   [+] dalfox: {len(new_findings)} finding(s) added.", _GREEN))
+
+    def _ext_nuclei(self, url: str) -> None:
+        from .tools.nuclei import NucleiRunner
+        from .tools import is_available
+        if not is_available("nuclei"):
+            if not self.config.get("quiet"):
+                print(self._c(
+                    "   [i] nuclei not found — install: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+                    _DIM,
+                ))
+            return
+        if not self.config.get("quiet"):
+            print(self._c("   [~] Launching nuclei template scan...", _YELLOW))
+        runner = NucleiRunner(self.config)
+        for f in runner.run(url):
+            self._add_finding(f)
+
+    def _ext_nikto(self, url: str) -> None:
+        from .tools.nikto import NiktoRunner
+        from .tools import is_available
+        if not is_available("nikto"):
+            if not self.config.get("quiet"):
+                print(self._c(
+                    "   [i] nikto not found — install: apt install nikto",
+                    _DIM,
+                ))
+            return
+        if not self.config.get("quiet"):
+            print(self._c("   [~] Launching nikto web server audit...", _YELLOW))
+        runner = NiktoRunner(self.config)
+        for f in runner.run(url):
+            self._add_finding(f)
+
+    def _ext_wpscan(self, url: str) -> None:
+        from .tools.wpscan import WPScanRunner
+        from .tools import is_available
+        if not is_available("wpscan"):
+            if not self.config.get("quiet"):
+                print(self._c(
+                    "   [i] wpscan not found — install: gem install wpscan",
+                    _DIM,
+                ))
+            return
+        if not self.config.get("quiet"):
+            print(self._c("   [~] Launching wpscan WordPress audit...", _YELLOW))
+        runner = WPScanRunner(self.config)
+        for f in runner.run(url):
+            self._add_finding(f)
+
+    def _suggest_follow_up(self, url: str) -> None:
+        """Print next-step tool commands based on what the scan found."""
+        if not self.findings:
+            return
+
+        sqli = [f for f in self.findings if "sql injection" in f.vuln_type.lower() and "[sqlmap]" not in f.vuln_type]
+        xss  = [f for f in self.findings if "cross-site" in f.vuln_type.lower() and "[dalfox]" not in f.vuln_type]
+        cves = [f for f in self.findings if "known cve" in f.vuln_type.lower()]
+        lfi  = [f for f in self.findings if "file inclusion" in f.vuln_type.lower() or "traversal" in f.vuln_type.lower()]
+
+        lines = []
+
+        if sqli:
+            f = sqli[0]
+            p = f.parameter or "PARAM"
+            dbms_hint = ""
+            for db in ("mysql", "mssql", "postgresql", "oracle", "sqlite"):
+                if db in (f.evidence or "").lower() or db in (f.details or "").lower():
+                    dbms_hint = f" --dbms {db}"
+                    break
+            method_hint = ""
+            data_hint = ""
+            if f.method.upper() == "POST":
+                method_hint = " --method POST"
+                data_hint = f" --data '{p}=*'"
+            lines.append("# SQLi confirmed — enumerate with sqlmap:")
+            lines.append(
+                f"$ sqlmap -u '{f.url}' -p {p}{method_hint}{data_hint}{dbms_hint} --batch --dbs"
+            )
+            lines.append(
+                f"$ sqlmap -u '{f.url}' -p {p}{method_hint}{data_hint}{dbms_hint} --batch -D <DB> --tables"
+            )
+            lines.append(
+                f"$ sqlmap -u '{f.url}' -p {p}{method_hint}{data_hint}{dbms_hint} --batch -D <DB> -T <TABLE> --dump"
+            )
+            lines.append("")
+
+        if xss:
+            f = xss[0]
+            p = f.parameter or "q"
+            if f.method.upper() == "POST":
+                lines.append("# XSS confirmed (POST) — verify with dalfox:")
+                form_data = self._form_targets[0]["params"] if self._form_targets else {p: ""}
+                data_str = "&".join(f"{k}={v}" for k, v in form_data.items())
+                lines.append(
+                    f"$ dalfox url '{f.url}' --data '{data_str}' --waf-evasion"
+                )
+            else:
+                lines.append("# XSS confirmed — verify with dalfox:")
+                lines.append(f"$ dalfox url '{f.url}' --waf-evasion")
+            lines.append("")
+
+        if cves:
+            lines.append("# Known CVEs — scan with nuclei:")
+            lines.append(f"$ nuclei -u '{url}' -t ~/nuclei-templates/ -tags cve -severity high,critical -j")
+            lines.append(f"$ searchsploit {cves[0].evidence.split('/')[0] if cves else 'service'}")
+            lines.append("")
+
+        if lfi:
+            f = lfi[0]
+            lines.append("# LFI confirmed — try RFI + log poisoning:")
+            lines.append(f"$ curl -s '{f.url}?{f.parameter}=/etc/passwd'")
+            lines.append(f"$ curl -s '{f.url}?{f.parameter}=/proc/self/environ'")
+            lines.append("")
+
+        if not lines:
+            return
+
+        print(self._c("   +--- Suggested next steps ---", _CYAN + _BOLD))
+        for line in lines:
+            if line.startswith("$"):
+                print(self._c(f"   {line}", _GREEN + _BOLD))
+            elif line.startswith("#"):
+                print(self._c(f"   {line}", _CYAN))
+            elif line == "":
+                print()
+            else:
+                print(self._c(f"   {line}", _DIM))
+        print(self._c("   +----------------------------", _CYAN + _BOLD))
 
     def _passive_secret_scan(self, url: str, baseline_resp) -> None:
         """Scan the page body + its same-origin <script src> bundles for secrets.
@@ -1231,14 +1407,22 @@ class Scanner:
             for name in params:
                 if target_param and name != target_param:
                     continue
-                targets.append(
-                    {
-                        "url": action,
-                        "method": method,
-                        "params": params,
-                        "param_name": name,
-                    }
-                )
+                t = {
+                    "url": action,
+                    "method": method,
+                    "params": params,
+                    "param_name": name,
+                    "is_form": True,
+                }
+                targets.append(t)
+
+            # Track full form context for ext-tool post-processing (sqlmap/dalfox need --data)
+            if params:
+                self._form_targets.append({
+                    "url": action,
+                    "method": method,
+                    "params": params,
+                })
 
         return targets
 
@@ -1253,12 +1437,15 @@ class Scanner:
             print(self._c(f"   ├─ param: ", _DIM) + self._c(f"{param_name!r}", _CYAN + _BOLD)
                   + self._c(f"  [{method}]", _DIM))
 
-        # Injection-only modules — skipped entirely on static/CDN targets
+        # Injection-only modules — skipped on static/CDN targets.
+        # Form targets are exempt: a form existing on the page proves server-side
+        # processing. The static check used random field names; the real form
+        # fields may trigger different server code.
         _INJECTION_MODULES = {
             "sqli", "xss", "lfi", "cmdi", "ssti", "crlf",
             "redirect", "jwt", "ssrf", "xxe", "bypass403",
         }
-        static = getattr(self, "_static_target", False)
+        static = getattr(self, "_static_target", False) and not target.get("is_form")
 
         # Each module gets its own HTTPClient so they can scan in parallel
         # without sharing state (e.g. redirect following toggle).
