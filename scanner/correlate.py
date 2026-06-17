@@ -218,7 +218,20 @@ def _chain_xss_session(v: _HostView) -> Optional[AttackPath]:
     We only build the chain when at least one of these containment gaps is real,
     and we phrase it according to which gap actually exists.
     """
-    xss = v.first("cross-site scripting") or v.first("xss")
+    # Match a GENUINE XSS finding only. Plain substring "xss" also matches
+    # "Missing Security Header: X-XSS-Protection" (x-XSS) and "DOM XSS
+    # (Potential — static taint)" (low-confidence), neither of which is an
+    # exploitable reflected/stored XSS we should chain into a session-hijack
+    # path. Require a real scripting finding and exclude header/potential ones.
+    xss = None
+    for f in v.any("cross-site scripting", "xss"):
+        t = f.vuln_type.lower()
+        if "missing" in t or "header" in t or "protection" in t:
+            continue  # X-XSS-Protection header, not an XSS bug
+        if "potential" in t or f.confidence == "low":
+            continue  # unconfirmed DOM-XSS hint — don't assert a hijack chain
+        xss = f
+        break
     if not xss:
         return None
 

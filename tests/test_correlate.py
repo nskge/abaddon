@@ -61,6 +61,34 @@ class TestCorrelate(unittest.TestCase):
         paths = correlate_findings(findings)
         self.assertTrue(any("session hijack" in p.name.lower() for p in paths))
 
+    def test_missing_xss_protection_header_not_treated_as_xss(self):
+        """Regression: 'Missing Security Header: X-XSS-Protection' must NOT be
+        chained into a reflected-XSS session-hijack path (the 'xss' substring
+        in 'X-XSS-Protection' previously caused a false positive)."""
+        findings = [
+            _f("Missing Security Header: X-XSS-Protection", param="(response headers)",
+               confidence="low", evidence="Header 'X-XSS-Protection' is absent"),
+            _f("Missing Security Header: Content-Security-Policy",
+               param="(response headers)", confidence="low",
+               evidence="No Content-Security-Policy"),
+        ]
+        paths = correlate_findings(findings)
+        self.assertFalse(
+            any("session hijack" in p.name.lower() for p in paths),
+            "A missing X-XSS-Protection header must not fabricate an XSS chain",
+        )
+
+    def test_low_confidence_dom_xss_not_chained(self):
+        """A low-confidence potential DOM-XSS hint must not assert a hijack chain."""
+        findings = [
+            _f("DOM XSS (Potential — static taint)", param="(client-side JS)",
+               confidence="low"),
+            _f("Missing Security Header: Content-Security-Policy",
+               param="(response headers)", confidence="low"),
+        ]
+        paths = correlate_findings(findings)
+        self.assertFalse(any("session hijack" in p.name.lower() for p in paths))
+
     def test_lfi_plus_log_is_rce(self):
         findings = [
             _f("Local File Inclusion (LFI)", param="file",
