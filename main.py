@@ -264,6 +264,15 @@ Examples
 
 
 def main() -> int:
+    # Box-drawing characters in the progress display (├─ █ …) crash on Windows
+    # consoles defaulting to cp1252. Force UTF-8 with replacement so a scan never
+    # dies on output encoding, regardless of the user's code page.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
     # No arguments → launch the interactive Abaddon menu.
     if len(sys.argv) == 1:
         try:

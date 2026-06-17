@@ -109,6 +109,21 @@ _APPEND_AND_PAIRS: List[Tuple[str, str]] = [
     (") AND (1=1)--",     ") AND (1=2)--"),
 ]
 
+# Quote-breaking AND pairs for STRING parameters (e.g. category=Gin).
+# These close the opening quote, add a condition, and keep the original value so
+# TRUE returns the same rows as the baseline and FALSE returns none — exactly the
+# differential the boolean classifier looks for. Without these, a string-context
+# SQLi (the most common kind) is missed because appended conditions stay inside
+# the string literal.
+_APPEND_STR_AND_PAIRS: List[Tuple[str, str]] = [
+    ("' AND '1'='1",        "' AND '1'='2"),
+    ("' AND '1'='1'-- ",    "' AND '1'='2'-- "),
+    ("' AND '1'='1'#",      "' AND '1'='2'#"),
+    ('" AND "1"="1',        '" AND "1"="2'),
+    ("') AND ('1'='1",      "') AND ('1'='2"),
+    ("')) AND (('1'='1",    "')) AND (('1'='2"),
+]
+
 # Replace-mode pairs — better for string parameters.
 _REPLACE_BOOL_PAIRS: List[Tuple[str, str]] = [
     ("' OR '1'='1",         "' OR '1'='2"),
@@ -175,6 +190,7 @@ class SQLiScanner(BaseModule):
 
         finding = (
             self._test_error_based(url, method, params, param_name, baseline_text)
+            or self._test_error_status(url, method, params, param_name, baseline_resp)
             or self._test_union_based(url, method, params, param_name, baseline_text)
             or self._test_boolean_based(url, method, params, param_name)
             or self._test_time_based(url, method, params, param_name)
@@ -311,6 +327,93 @@ class SQLiScanner(BaseModule):
                     ),
                 )
         return None
+
+    # ------------------------------------------------------------------
+    # Strategy 1a: Error-based via HTTP status transition
+    # ------------------------------------------------------------------
+
+    def _test_error_status(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+        baseline_resp=None,
+    ) -> Optional[Finding]:
+        """Detect SQLi when a broken quote yields a 5xx that balanced syntax fixes.
+
+        Many back-ends (PostgreSQL/Express, framework error pages) return a
+        generic HTTP 500 on a SQL syntax error WITHOUT leaking a recognisable DB
+        error string — so signature matching misses them. The decisive tell is
+        behavioural:
+
+            baseline      → 2xx/3xx/4xx (not 5xx)
+            value + '     → 5xx        (unbalanced quote breaks the query)
+            value + ''    → back to <5xx (balanced quote / comment repairs it)
+            value + '     → 5xx again  (re-confirm; rules out a transient blip)
+
+        A param that always 5xx (recovery fails) or never 5xx (quote step fails)
+        cannot pass, so false positives are well contained.
+        """
+        base = baseline_resp if baseline_resp is not None else self._send(url, method, params)
+        if base is None or base.status_code >= 500:
+            return None
+
+        r_quote = self._send(url, method, self._append(params, param_name, "'"))
+        if r_quote is None or r_quote.status_code < 500:
+            return None
+
+        # A balanced quote, a comment-out, or a string-concat must repair syntax.
+        recovery = None
+        for fix in ("''", "'-- ", "'#", "' AND '1'='1", "'||'"):
+            r_fix = self._send(url, method, self._append(params, param_name, fix))
+            if r_fix is not None and r_fix.status_code < 500:
+                recovery = fix
+                break
+        if recovery is None:
+            return None
+
+        # Re-confirm the quote still breaks it (transient-5xx guard).
+        r_quote2 = self._send(url, method, self._append(params, param_name, "'"))
+        if r_quote2 is None or r_quote2.status_code < 500:
+            return None
+
+        orig = params.get(param_name, "")
+        display_payload = f"{orig}'"
+        curl = build_curl_command(url, method, self._append(params, param_name, "'"), param_name, display_payload)
+        logger.debug(
+            "[SQLi/StatusTransition] %s: baseline=%d quote=%d recover(%r)<500 — confirmed",
+            param_name, base.status_code, r_quote.status_code, recovery,
+        )
+        return Finding(
+            vuln_type="SQL Injection (Error-based, status transition)",
+            url=url,
+            method=method,
+            parameter=param_name,
+            payload=display_payload,
+            evidence=(
+                f"A single quote flips the response {base.status_code}→{r_quote.status_code}; "
+                f"balancing it with {recovery!r} restores {('<500')} and re-adding the quote "
+                f"breaks it again — a SQL syntax error the server hides behind a generic 500."
+            ),
+            confidence="high",
+            details=(
+                f"The {param_name!r} parameter is concatenated into a SQL query. An "
+                f"unbalanced quote produces a server error (HTTP {r_quote.status_code}); "
+                f"balanced/commented syntax executes cleanly. The DB error string isn't "
+                f"leaked, but the status flip is deterministic proof of injection. "
+                f"Confirm extraction with sqlmap. Remediation: parameterised queries."
+            ),
+            reproduction=(
+                f"# 1. Baseline (HTTP {base.status_code}):\n"
+                f"$ curl -s -k -o /dev/null -w '%{{http_code}}\\n' '{rebuild_url_with_params(url, params)}'\n"
+                f"# 2. Break the query with a quote (expect {r_quote.status_code}):\n"
+                f"{curl.replace('curl -s', 'curl -s -o /dev/null -w ' + chr(39) + '%{http_code}' + chr(92) + 'n' + chr(39))}\n"
+                f"# 3. Repair with balanced syntax (expect <500): append {recovery!r}\n"
+                f"# 4. Automate extraction:\n"
+                f"$ sqlmap -u '{rebuild_url_with_params(url, params)}' -p {param_name} --batch --dbs"
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Strategy 1b: UNION-based (in-band extraction — solid, visible proof)
@@ -583,8 +686,8 @@ class SQLiScanner(BaseModule):
                 )
                 return None
 
-        # --- Append-mode AND pairs (numeric-safe) ---
-        for true_sfx, false_sfx in _APPEND_AND_PAIRS:
+        # --- Append-mode AND pairs (numeric-safe + string quote-breaking) ---
+        for true_sfx, false_sfx in _APPEND_AND_PAIRS + _APPEND_STR_AND_PAIRS:
             orig = params.get(param_name, "")
             true_pl  = f"{orig}{true_sfx}"
             false_pl = f"{orig}{false_sfx}"

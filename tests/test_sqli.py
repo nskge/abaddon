@@ -243,6 +243,87 @@ class TestSQLiBooleanBased(unittest.TestCase):
             finding, "Boolean candidate that fails the re-test must not be flagged",
         )
 
+    def test_string_quote_breaking_pair_detected(self):
+        """String-context SQLi (category=Gin): quote-breaking AND pair differentiates."""
+        baseline = _make_response("PRODUCT " * 100)        # ~800 bytes
+        true_resp = _make_response("PRODUCT " * 99)        # near baseline (TRUE keeps rows)
+        false_resp = _make_response("PRODUCT " * 20)       # far smaller (FALSE -> no rows)
+
+        scanner = self._scanner()
+        scanner._test_error_based = lambda *a, **kw: None
+        scanner._test_error_status = lambda *a, **kw: None  # isolate boolean path
+        # 2 stable baselines, then the numeric AND pairs return baseline (no signal),
+        # then a string quote-breaking pair hits, then reconfirm repeats the hit.
+        n_numeric = 6  # _APPEND_AND_PAIRS length
+        seq = [baseline, baseline]
+        seq += [baseline, baseline] * n_numeric          # numeric pairs: no differential
+        seq += [true_resp, false_resp]                   # first string pair: hit
+        seq += [true_resp, false_resp]                   # reconfirm: same hit
+        scanner.http.get.side_effect = lambda *a, **kw: seq.pop(0) if seq else baseline
+
+        finding = scanner._test_boolean_based(
+            url="https://shop.local/catalog",
+            method="GET",
+            params={"category": "Gin"},
+            param_name="category",
+        )
+        self.assertIsNotNone(finding, "Quote-breaking string boolean pair must be detected")
+
+
+class TestSQLiStatusTransition(unittest.TestCase):
+    """Error-based detection via HTTP 200→500→recover status transition."""
+
+    def _scanner(self):
+        return SQLiScanner(MagicMock(), {"delay_threshold": 5.0})
+
+    def test_status_transition_detected(self):
+        """quote→500, balanced→200, quote→500 again = confirmed."""
+        base = _make_response("ok", 200)
+        broken = _make_response("error", 500)
+        fixed = _make_response("ok", 200)
+        scanner = self._scanner()
+        # order: baseline, quote(500), recovery '' (200), reconfirm quote(500)
+        scanner.http.get.side_effect = [base, broken, fixed, broken]
+        finding = scanner._test_error_status(
+            "https://shop.local/catalog", "GET", {"category": "Gin"}, "category",
+        )
+        self.assertIsNotNone(finding)
+        self.assertIn("status transition", finding.vuln_type)
+        self.assertEqual(finding.confidence, "high")
+
+    def test_always_500_not_flagged(self):
+        """A param that 500s on everything (recovery fails) must not be flagged."""
+        broken = _make_response("error", 500)
+        scanner = self._scanner()
+        scanner.http.get.return_value = broken
+        # baseline itself is 500 → bail immediately
+        finding = scanner._test_error_status(
+            "https://shop.local/x", "GET", {"a": "1"}, "a",
+        )
+        self.assertIsNone(finding)
+
+    def test_quote_no_error_not_flagged(self):
+        """If the quote doesn't break anything (stays 200), no finding."""
+        base = _make_response("ok", 200)
+        scanner = self._scanner()
+        scanner.http.get.side_effect = [base, base, base, base, base]
+        finding = scanner._test_error_status(
+            "https://shop.local/x", "GET", {"a": "1"}, "a",
+        )
+        self.assertIsNone(finding)
+
+    def test_recovery_fails_not_flagged(self):
+        """quote→500 but nothing recovers → not flagged (always-erroring param)."""
+        base = _make_response("ok", 200)
+        broken = _make_response("error", 500)
+        scanner = self._scanner()
+        # baseline 200, quote 500, then all recovery attempts stay 500
+        scanner.http.get.side_effect = [base] + [broken] * 10
+        finding = scanner._test_error_status(
+            "https://shop.local/x", "GET", {"a": "1"}, "a",
+        )
+        self.assertIsNone(finding)
+
 
 class TestSQLiUnionBased(unittest.TestCase):
     """UNION-based in-band extraction — the 'solid proof' path."""
