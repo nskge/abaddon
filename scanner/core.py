@@ -165,6 +165,7 @@ class Scanner:
         self._seen_keys: set = set()  # dedup: (vuln_type, url, param, payload)
         self._no_color = config.get("no_color", False)
         self._detected_waf: str = ""   # set by _preflight_check on WAF detection
+        self._cf_challenge: bool = False  # True = Cloudflare full-challenge block
         self._form_targets: List[Dict] = []  # form targets with their POST data
 
         # Adaptive rate limiter (shared across all module threads)
@@ -704,6 +705,34 @@ class Scanner:
 
         if resp.status_code in (403, 429, 503):
             body_lower = resp.text.lower()
+            # Cloudflare full challenge mode — JS challenge required, payloads
+            # will never reach the app. Detect early to avoid 200+ wasted requests.
+            cf_challenge = (
+                resp.headers.get("Cf-Mitigated", "").lower() == "challenge"
+                or (re.search(r"just a moment\.\.\.", body_lower) and
+                    resp.headers.get("Server", "").lower() == "cloudflare")
+            )
+            if cf_challenge:
+                self._cf_challenge = True
+                self._detected_waf = "Cloudflare"
+                if not self.config.get("quiet"):
+                    print(self._c(
+                        "\n   [!] CLOUDFLARE CHALLENGE — payloads cannot reach the app.",
+                        _RED + _BOLD,
+                    ))
+                    print(self._c(
+                        "   [!] To bypass: open the URL in a browser, solve the challenge,\n"
+                        "       then copy the cf_clearance cookie and re-run with:\n"
+                        "       --cookies 'cf_clearance=<value>; __cf_bm=<value>'",
+                        _YELLOW,
+                    ))
+                    print()
+                logger.warning(
+                    "Cloudflare JS challenge detected — injection modules will be skipped. "
+                    "Supply a valid cf_clearance cookie via --cookies to scan through it."
+                )
+                return resp
+
             for pattern, waf_name in _WAF_SIGNATURES:
                 if re.search(pattern, body_lower, re.IGNORECASE):
                     self._detected_waf = waf_name
@@ -1471,6 +1500,12 @@ class Scanner:
             "redirect", "jwt", "ssrf", "xxe", "bypass403", "prototype",
         }
         static = getattr(self, "_static_target", False) and not target.get("is_form")
+
+        # Cloudflare JS challenge: ALL payloads hit the challenge page, not the app.
+        # Skip injection entirely — headers/CVE were already captured at preflight.
+        if getattr(self, "_cf_challenge", False):
+            logger.debug("CF challenge active — skipping injection for %r", param_name)
+            return
 
         # Each module gets its own HTTPClient so they can scan in parallel
         # without sharing state (e.g. redirect following toggle).

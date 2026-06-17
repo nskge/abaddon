@@ -131,6 +131,14 @@ Examples
             "0=off  1=url+null  2=+double+case  3=+html+sqli-comments  (default: 0)"
         ),
     )
+    scan.add_argument(
+        "--tamper", action="store_true",
+        help=(
+            "Enable SQL payload tamper transforms (comment insertion AND/**/, mixed case, "
+            "hex-encoding of quotes). Helps bypass signature-based SQL WAF filters. "
+            "Auto-enabled when a WAF is detected during scanning."
+        ),
+    )
 
     # ---- External tools ----
     ext = parser.add_argument_group("External tools (secondary pass)")
@@ -364,6 +372,7 @@ def main() -> int:
         "no_color": args.no_color,
         # New features
         "aggressive":       getattr(args, "aggressive", False),
+        "tamper":           getattr(args, "tamper", False),
         "waf_evasion":      args.waf_evasion,
         "port_scan":        args.port_scan,
         "discover_paths":   args.discover_paths,
