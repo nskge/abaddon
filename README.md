@@ -68,13 +68,16 @@ Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.
 | **CRLF** | Header injection, Set-Cookie injection, response splitting |
 | **Redirect** | Open redirect via Location, meta-refresh, JavaScript |
 | **Headers** | Missing security headers, server disclosure, CORS misconfiguration (passive wildcard + active reflected-origin probe) |
-| **JWT** | alg:none bypass, weak HS256 secret brute-force, sensitive payload fields |
+| **JWT** | alg:none bypass, weak HS256 brute-force, RS→HS algorithm confusion (auto-locates exposed JWKS), kid path-traversal/SQLi injection, jku/x5u key-injection & SSRF, sensitive payload fields |
 | **SSRF** | Cloud metadata (AWS/GCP/Azure), localhost, internal services (Redis/ES/k8s) — parallel probes |
 | **XXE** | Raw XML POST, XML param injection, XML-hinted params — 6 payload variants |
 | **403 Bypass** | Header spoofing (X-Original-URL, X-Forwarded-For, …), path manipulation (16 variants), verb tampering |
 | **GraphQL** | Introspection exposure, GraphiQL/Playground IDE, batch queries, field suggestions — 12 common endpoint paths probed |
 | **IDOR** | Numeric ID and UUID parameter enumeration, path-segment ID traversal — dual-baseline stability guard, size-similarity gate to suppress false positives |
-| **CVE Detection** | 34 CVEs across 14 services (Apache, Nginx, PHP, IIS, Tomcat, OpenSSL, jQuery, WordPress, Drupal, Struts, Spring, WebLogic, Confluence, Joomla) with CVSS, Metasploit modules, NVD links |
+| **DOM XSS** | Source→sink taint analysis over inline + same-origin JS, plus live Chromium confirmation (dialog hook) — finds client-side XSS that never reaches the server, including in static SPAs |
+| **Prototype Pollution** | Server-side `__proto__` / `constructor.prototype` pollution via query + JSON body, confirmed through the Express `json spaces` response gadget |
+| **Smuggling** | HTTP request smuggling (CL.TE / TE.CL) via timing-differential raw-socket probes — opt-in (`--scan-type smuggling` or `--aggressive`) |
+| **CVE Detection** | 43 CVEs across 19 services (Apache, Nginx, PHP, IIS, Tomcat, OpenSSL, jQuery, WordPress, Drupal, Struts, Spring, WebLogic, Confluence, Joomla, Jenkins, GitLab, Grafana, Kibana, phpMyAdmin) with CVSS, Metasploit modules, NVD links |
 
 ---
 
@@ -87,6 +90,8 @@ Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.
 - **Differential-timing confirmation** — blind time-based SQLi/CMDi candidates are re-tested at 2× the sleep and only reported when the delay scales proportionally, killing latency-spike false positives
 - **Boolean re-confirmation** — boolean-blind SQLi signals must reproduce on a second request before being reported (dynamic-page false-positive guard)
 - **Attack-path correlation** — BloodHound-style chaining composes confirmed findings into escalation paths (e.g. SQLi + weak JWT → account takeover, SSRF → cloud credential theft), shown on console and in JSON
+- **External tool orchestration** — optional secondary pass with **sqlmap** (auto WAF tampers + post-exploitation `--dbs` enumeration), **dalfox** (XSS), **nuclei** (CVE/template), **nikto** (server audit), and **wpscan** (WordPress) — runs only when the native engine finds nothing or a WAF blocks it, with results normalised into the same report (`--use-sqlmap`, `--use-dalfox`, `--use-nuclei`, `--use-nikto`, `--use-wpscan`, `--ext-tools`)
+- **Suggested next steps** — after every scan, prints ready-to-paste follow-up commands (sqlmap dump, dalfox, nuclei) derived from the confirmed findings
 - **JS-aware crawl** — headless Chromium via Playwright; clicks modals/buttons (Register, Login, Cadastrar…), intercepts XHR/Fetch, finds inputs with no `name` attribute (`--js-crawl`)
 - **Subdomain takeover** — CNAME chain resolution → unclaimed-service fingerprint check (12 services)
 - **Port scanner** — concurrent TCP probe of 31 common ports with banner grab (`--port-scan`)
@@ -99,7 +104,7 @@ Interactive menu, dark-purple TUI, and a template-driven async engine. — **v2.
 - **Concurrent scanning** — modules run in parallel (configurable `--threads`)
 - **Report export** — TXT and JSON formats with curl + msfconsole reproduction steps
 - **ABADDON async engine** — optional high-concurrency core (`python -m abaddon`): `httpx.AsyncClient` + HTTP/2, Nuclei-style YAML templates (Pydantic V2 validated), smart matchers (OAST out-of-band, time/entropy deltas, context-aware reflection) with multi-signal **confidence correlation**, per-host adaptive throttling, and JSONL output for SIEM
-- **424 unit tests** — plus `tools/ctf_recall.py`, which measures detection recall against a ground-truth CTF (currently **9/9**)
+- **547 unit tests** — plus `tools/ctf_recall.py`, which measures detection recall against a ground-truth CTF (currently **9/9**)
 
 ---
 
@@ -269,7 +274,7 @@ Output:
 ## Tests
 
 ```bash
-python -m pytest tests/ -v     # 424 tests
+python -m pytest tests/ -v     # 547 tests
 ```
 
 ---

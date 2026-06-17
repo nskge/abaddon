@@ -85,10 +85,17 @@ Examples
         choices=[
             "sqli", "xss", "lfi", "redirect", "cmdi", "crlf",
             "ssti", "headers", "jwt", "ssrf", "xxe", "bypass403",
-            "graphql", "idor", "all",
+            "graphql", "idor", "domxss", "prototype", "smuggling", "all",
         ],
         default="all",
         help="Vulnerability type to scan for  (default: all)",
+    )
+    scan.add_argument(
+        "--aggressive", action="store_true",
+        help=(
+            "Include slow/disruptive modules (HTTP request smuggling) in the "
+            "'all' scan. Only use on infra you're authorised to stress-test."
+        ),
     )
     scan.add_argument(
         "--crawl", action="store_true",
@@ -346,6 +353,7 @@ def main() -> int:
         "quiet": args.quiet,
         "no_color": args.no_color,
         # New features
+        "aggressive":       getattr(args, "aggressive", False),
         "waf_evasion":      args.waf_evasion,
         "port_scan":        args.port_scan,
         "discover_paths":   args.discover_paths,

@@ -54,7 +54,8 @@ def _between(v: str, low: str, high: str) -> bool:
 _VERSION_RE = re.compile(
     r"\b(Apache(?:\s+Tomcat)?|nginx|Microsoft-IIS|PHP|OpenSSL|LiteSpeed|"
     r"Werkzeug|Python|gunicorn|Tomcat|Express|Jetty|Caddy|"
-    r"WebLogic|Struts|Struts2|Confluence|JBoss|WildFly|Joomla)"
+    r"WebLogic|Struts|Struts2|Confluence|JBoss|WildFly|Joomla|"
+    r"Jenkins|GitLab|Grafana|Kibana|phpMyAdmin)"
     r"[/\s](\d+(?:\.\d+)*[a-z]?)",
     re.IGNORECASE,
 )
@@ -75,6 +76,22 @@ _BODY_VERSION_PATTERNS = [
     (re.compile(r'Spring\s+Boot\s+(?:v|Version\s+)?(\d+(?:\.\d+)*)', re.I), "spring"),
     # Struts error pages / viewId
     (re.compile(r'Struts\s+(?:Problem|Version\s+)?(?:v|Report\s+)?(\d+(?:\.\d+)*)', re.I), "struts"),
+    # GitLab version in body / meta
+    (re.compile(r'GitLab\s+(?:Community|Enterprise)?\s*Edition[^0-9]{0,20}(\d+\.\d+\.\d+)', re.I), "gitlab"),
+    (re.compile(r'"version":"(\d+\.\d+\.\d+)"[^}]*gitlab', re.I), "gitlab"),
+    # Grafana version in body
+    (re.compile(r'Grafana\s+v?(\d+\.\d+\.\d+)', re.I), "grafana"),
+    (re.compile(r'"version":"(\d+\.\d+\.\d+)"[^}]*grafana', re.I), "grafana"),
+    # phpMyAdmin version in body
+    (re.compile(r'phpMyAdmin\s+(\d+\.\d+\.\d+)', re.I), "phpmyadmin"),
+    # Kibana version
+    (re.compile(r'"version":"(\d+\.\d+\.\d+)"[^}]*kibana', re.I), "kibana"),
+]
+
+# Headers carrying a version directly (header_name, regex, service)
+_HEADER_VERSION_SIGS = [
+    ("X-Jenkins", re.compile(r"(\d+\.\d+(?:\.\d+)?)"), "jenkins"),
+    ("X-Kibana-Version", re.compile(r"(\d+\.\d+\.\d+)"), "kibana"),
 ]
 
 _SERVICE_ALIASES: Dict[str, str] = {
@@ -100,6 +117,11 @@ _SERVICE_ALIASES: Dict[str, str] = {
     "wildfly": "wildfly",
     "joomla": "joomla",
     "spring": "spring",
+    "jenkins": "jenkins",
+    "gitlab": "gitlab",
+    "grafana": "grafana",
+    "kibana": "kibana",
+    "phpmyadmin": "phpmyadmin",
 }
 
 
@@ -130,6 +152,18 @@ def extract_versions(resp) -> List[Tuple[str, str]]:
             svc = _SERVICE_ALIASES.get(raw_name, raw_name)
             version = match.group(2)
             key = (svc, version)
+            if key not in seen:
+                seen.add(key)
+                found.append(key)
+
+    # Dedicated single-service version headers (X-Jenkins, X-Kibana-Version, ...)
+    for header_name, pattern, svc in _HEADER_VERSION_SIGS:
+        value = resp.headers.get(header_name, "")
+        if not value:
+            continue
+        m = pattern.search(value)
+        if m:
+            key = (svc, m.group(1))
             if key not in seen:
                 seen.add(key)
                 found.append(key)
@@ -754,6 +788,121 @@ _CVE_DB: List[Dict] = [
         ),
         "msf": None,
         "msf_payload": None,
+    },
+    # ================================================================
+    # Jenkins
+    # ================================================================
+    {
+        "service": "jenkins",
+        "check": lambda v: _lt(v, "2.442") and not _lt(v, "2.0"),
+        "cve": "CVE-2024-23897",
+        "cvss": 9.8,
+        "severity": "CRITICAL",
+        "impact": (
+            "Arbitrary file read via the Jenkins CLI args4j character-feed "
+            "feature. Unauthenticated attackers read files (secrets, SSH keys, "
+            "credentials.xml) which often escalates to full RCE via decryption "
+            "of stored secrets."
+        ),
+        "msf": "auxiliary/gather/jenkins_cli_arbitrary_file_read",
+        "msf_payload": None,
+    },
+    {
+        "service": "jenkins",
+        "check": lambda v: _lt(v, "2.138") and not _lt(v, "2.0"),
+        "cve": "CVE-2018-1000861",
+        "cvss": 9.8,
+        "severity": "CRITICAL",
+        "impact": (
+            "Remote code execution via the Stapler web framework allowing "
+            "unauthenticated attackers to invoke arbitrary methods, commonly "
+            "chained with the Groovy meta-programming bypass for RCE."
+        ),
+        "msf": "exploit/multi/http/jenkins_metaprogramming",
+        "msf_payload": "java/meterpreter/reverse_tcp",
+    },
+    # ================================================================
+    # GitLab
+    # ================================================================
+    {
+        "service": "gitlab",
+        "check": lambda v: _between(v, "11.9.0", "13.10.2"),
+        "cve": "CVE-2021-22205",
+        "cvss": 9.8,
+        "severity": "CRITICAL",
+        "impact": (
+            "Unauthenticated remote code execution via improper image handling "
+            "(ExifTool) on file upload. No authentication required; trivially "
+            "wormable and widely exploited in the wild."
+        ),
+        "msf": "exploit/multi/http/gitlab_exif_rce",
+        "msf_payload": "ruby/shell_reverse_tcp",
+    },
+    {
+        "service": "gitlab",
+        "check": lambda v: _between(v, "16.0.0", "16.0.1"),
+        "cve": "CVE-2023-2825",
+        "cvss": 10.0,
+        "severity": "CRITICAL",
+        "impact": (
+            "Path traversal allowing an unauthenticated attacker to read "
+            "arbitrary files on the server (including secrets and tokens) via "
+            "a crafted nested public group/project path."
+        ),
+        "msf": None,
+        "msf_payload": None,
+    },
+    # ================================================================
+    # Grafana
+    # ================================================================
+    {
+        "service": "grafana",
+        "check": lambda v: _between(v, "8.0.0", "8.3.0"),
+        "cve": "CVE-2021-43798",
+        "cvss": 7.5,
+        "severity": "HIGH",
+        "impact": (
+            "Directory traversal via plugin path lets an unauthenticated "
+            "attacker read arbitrary files (e.g. /etc/passwd, grafana.ini with "
+            "DB credentials and the secret key) at "
+            "/public/plugins/<plugin>/../../../../../../etc/passwd."
+        ),
+        "msf": None,
+        "msf_payload": None,
+    },
+    # ================================================================
+    # phpMyAdmin
+    # ================================================================
+    {
+        "service": "phpmyadmin",
+        "check": lambda v: _between(v, "4.8.0", "4.8.1"),
+        "cve": "CVE-2018-12613",
+        "cvss": 8.8,
+        "severity": "HIGH",
+        "impact": (
+            "Authenticated local file inclusion via the index.php 'target' "
+            "parameter that reaches code execution by including session or log "
+            "files containing PHP payloads."
+        ),
+        "msf": "exploit/multi/http/phpmyadmin_lfi_rce",
+        "msf_payload": "php/meterpreter/reverse_tcp",
+    },
+    # ================================================================
+    # Kibana
+    # ================================================================
+    {
+        "service": "kibana",
+        "check": lambda v: _lt(v, "5.6.15") or _between(v, "6.0.0", "6.6.0"),
+        "cve": "CVE-2019-7609",
+        "cvss": 10.0,
+        "severity": "CRITICAL",
+        "impact": (
+            "Remote code execution via the Timelion prototype-pollution "
+            "vulnerability, allowing an attacker to run arbitrary Node.js code "
+            "on the Kibana host."
+        ),
+        "msf": "exploit/linux/http/kibana_timelion_prototype_pollution_rce",
+        "msf_payload": "nodejs/shell_reverse_tcp",
     },
 ]
 

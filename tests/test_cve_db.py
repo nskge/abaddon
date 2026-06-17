@@ -419,3 +419,40 @@ class TestVersionExtraction:
     def test_empty_response_no_versions(self):
         resp = FakeResp()
         assert extract_versions(resp) == []
+
+    # ---- New fingerprints: Jenkins / GitLab / Grafana ----
+
+    def test_jenkins_from_x_jenkins_header(self):
+        resp = FakeResp({"X-Jenkins": "2.426.1"})
+        versions = extract_versions(resp)
+        assert ("jenkins", "2.426.1") in versions
+
+    def test_gitlab_from_body(self):
+        body = 'GitLab Community Edition v13.10.0 footer'
+        resp = FakeResp(body=body)
+        versions = extract_versions(resp)
+        assert any(svc == "gitlab" for svc, _ in versions)
+
+    def test_grafana_from_body(self):
+        body = '<title>Grafana v8.2.0</title>'
+        resp = FakeResp(body=body)
+        versions = extract_versions(resp)
+        assert ("grafana", "8.2.0") in versions
+
+
+class TestNewServiceCVEs:
+    def test_jenkins_file_read_cve(self):
+        matches = match_cves([("jenkins", "2.426.1")])
+        assert any(m["cve"] == "CVE-2024-23897" for m in matches)
+
+    def test_gitlab_exiftool_rce(self):
+        matches = match_cves([("gitlab", "13.9.0")])
+        assert any(m["cve"] == "CVE-2021-22205" for m in matches)
+
+    def test_grafana_path_traversal(self):
+        matches = match_cves([("grafana", "8.2.0")])
+        assert any(m["cve"] == "CVE-2021-43798" for m in matches)
+
+    def test_patched_jenkins_no_match(self):
+        matches = match_cves([("jenkins", "2.500")])
+        assert not any(m["cve"] == "CVE-2024-23897" for m in matches)

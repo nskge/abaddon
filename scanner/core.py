@@ -26,6 +26,9 @@ from .modules.ssti import SSTIScanner
 from .modules.ssrf import SSRFScanner
 from .modules.xss import XSSScanner
 from .modules.xxe import XXEScanner
+from .modules.dom_xss import DOMXSSScanner
+from .modules.prototype_pollution import PrototypePollutionScanner
+from .modules.smuggling import SmugglingScanner
 from .parser import (
     extract_forms,
     extract_params_from_url,
@@ -61,7 +64,14 @@ _MODULE_MAP = {
     "bypass403": Bypass403Scanner,
     "graphql":   GraphQLScanner,
     "idor":      IDORScanner,
+    "domxss":    DOMXSSScanner,
+    "prototype": PrototypePollutionScanner,
+    "smuggling": SmugglingScanner,
 }
+
+# Modules excluded from the default "all" scan because they are slow or
+# potentially disruptive to shared infrastructure. Selectable individually.
+_HEAVY_MODULES = {"smuggling"}
 
 # ANSI helpers for recon display
 _CYAN = "\033[96m"
@@ -170,7 +180,13 @@ class Scanner:
 
         scan_type = config.get("scan_type", "all")
         if scan_type == "all":
-            self.module_classes = list(_MODULE_MAP.values())
+            # Heavy/disruptive modules (e.g. smuggling) are opt-in even on "all",
+            # unless the caller explicitly enables them via config["aggressive"].
+            aggressive = config.get("aggressive", False)
+            self.module_classes = [
+                cls for name, cls in _MODULE_MAP.items()
+                if aggressive or name not in _HEAVY_MODULES
+            ]
         elif scan_type in _MODULE_MAP:
             self.module_classes = [_MODULE_MAP[scan_type]]
         else:
@@ -356,6 +372,8 @@ class Scanner:
         if server and techs:
             server_lower = server.lower().split("/")[0].strip()
             techs = [t for t in techs if t.lower() != server_lower]
+        # Stash for downstream consumers (wpscan auto-detect, etc.)
+        self.config["_detected_techs"] = techs
         if techs:
             print(self._c("   | Tech     : ", _DIM) + self._c(", ".join(techs), _YELLOW))
         if latency_ms is not None:
@@ -1441,9 +1459,11 @@ class Scanner:
         # Form targets are exempt: a form existing on the page proves server-side
         # processing. The static check used random field names; the real form
         # fields may trigger different server code.
+        # Note: domxss is intentionally NOT here — DOM XSS lives in client-side
+        # JS and is the ONE class that matters most on static/CDN SPA targets.
         _INJECTION_MODULES = {
             "sqli", "xss", "lfi", "cmdi", "ssti", "crlf",
-            "redirect", "jwt", "ssrf", "xxe", "bypass403",
+            "redirect", "jwt", "ssrf", "xxe", "bypass403", "prototype",
         }
         static = getattr(self, "_static_target", False) and not target.get("is_form")
 

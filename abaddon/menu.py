@@ -99,6 +99,9 @@ SCAN_MODULES: List[Tuple[str, str]] = [
     ("bypass403", "403 / forbidden bypass"),
     ("graphql", "GraphQL introspection / IDEs"),
     ("idor", "IDOR / object reference"),
+    ("domxss", "DOM-based XSS (source→sink + Playwright)"),
+    ("prototype", "Prototype Pollution (server-side)"),
+    ("smuggling", "HTTP Request Smuggling (CL.TE / TE.CL)"),
 ]
 
 
@@ -173,6 +176,7 @@ class MenuState:
             "discover_subs": False,
             "rate_limit": self.rate_limit,
             "rate_limit_delay": self.rate_delay,
+            "aggressive": False,
             "bb_note": None,
             "bb_program": None,
             "use_sqlmap": self.use_sqlmap,
