@@ -9,5 +9,11 @@ build/
 *.log
 report.json
 report.txt
+*.report.txt
 .vscode/
 .idea/
+
+# Local scan output / scratch files (CTF recall runs, ad-hoc dumps)
+recall*.txt
+sx.txt
+scan_*.txt
