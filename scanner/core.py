@@ -29,6 +29,8 @@ from .modules.xxe import XXEScanner
 from .modules.dom_xss import DOMXSSScanner
 from .modules.prototype_pollution import PrototypePollutionScanner
 from .modules.smuggling import SmugglingScanner
+from .modules.deserialization import DeserializationScanner
+from .modules.race import RaceConditionScanner
 from .parser import (
     extract_forms,
     extract_params_from_url,
@@ -67,11 +69,14 @@ _MODULE_MAP = {
     "domxss":    DOMXSSScanner,
     "prototype": PrototypePollutionScanner,
     "smuggling": SmugglingScanner,
+    "deserial":  DeserializationScanner,
+    "race":      RaceConditionScanner,
 }
 
 # Modules excluded from the default "all" scan because they are slow or
 # potentially disruptive to shared infrastructure. Selectable individually.
-_HEAVY_MODULES = {"smuggling"}
+# (deserial is passive/signature-based, so it stays in the default scan.)
+_HEAVY_MODULES = {"smuggling", "race"}
 
 # ANSI helpers for recon display
 _CYAN = "\033[96m"

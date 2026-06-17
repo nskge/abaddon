@@ -102,6 +102,8 @@ SCAN_MODULES: List[Tuple[str, str]] = [
     ("domxss", "DOM-based XSS (source→sink + Playwright)"),
     ("prototype", "Prototype Pollution (server-side)"),
     ("smuggling", "HTTP Request Smuggling (CL.TE / TE.CL)"),
+    ("deserial", "Insecure Deserialization (Java/PHP/pickle/.NET)"),
+    ("race", "Race Condition (limit-overrun burst)"),
 ]
 
 
